@@ -1,209 +1,145 @@
 # Multi-Agent Control (MAC)
 
-MAC is a local MCP control plane that lets an AI Master coordinate configurable
-workers. It manages worker capacity, task state, validation and approval while
-keeping the Master in control.
+MAC connects an AI Master to local workers through MCP.
 
-## English
-
-### Install
-
-```bash
-git clone https://github.com/Horaus/mac.git
-cd mac
-./scripts/bootstrap.sh .
-```
-
-After installation, run `mac` from any terminal. The first run opens setup;
-later runs use the same command and preserve configuration and runtime data.
-
-### Connect an AI host
-
-MAC is called through MCP. After configuring the MAC MCP server in your AI
-host, write only:
-
-```text
-Connect to the MAC MCP server installed in this project.
-```
-
-#### Configure MCP
-
-From the MAC project directory, Codex CLI:
-
-~~~bash
-codex mcp add mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
-codex mcp get mac
-~~~
-
-Restart Codex. In the Codex app or IDE extension, open Settings, MCP servers,
-Add server, and enter the same Python command, arguments and PYTHONPATH.
-
-Claude Code:
-
-~~~bash
-claude mcp add --scope user mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
-claude mcp get mac
-~~~
-
-Restart Claude Code and verify with /mcp.
-
-Gemini CLI: add a server named mac to ~/.gemini/settings.json:
-
-~~~json
-{
-  "mcpServers": {
-    "mac": {
-      "command": "/ABSOLUTE/PATH/mac/.venv/bin/python",
-      "args": ["-m", "agent_control_plane", "mcp", "--state", "/ABSOLUTE/PATH/mac/.agent-control-plane/state.sqlite3"],
-      "env": {"PYTHONPATH": "/ABSOLUTE/PATH/mac/src"}
-    }
-  }
-}
-~~~
-
-Replace the absolute paths, restart Gemini, and verify that mac and its tools
-are visible.
-
-After connecting, MAC loads its rules and knowledge; the Master asks for the
-goal, worker count and expected result. The AI host must show MAC tools before
-it can call MAC. A prompt alone cannot connect an unconfigured local process.
-
-### Update
-
-```bash
-cd mac
-git pull
-./scripts/bootstrap.sh .
-```
-
-The setup and state directory is kept outside the checkout, so updates do not
-overwrite the saved profile.
-
-### First setup screen
-
-![MAC main menu](assets/main-menu.png)
-
-From the main menu you can open setup, status, Master help, update and system
-check. The same menu is available every time you run `mac`.
-
-![MAC provider selection](assets/providers.png)
-
-Select one or more CLI providers. Different workers can use different
-providers; Codex and Gemini can run in the same profile.
-
-![MAC setup and Control screen](assets/setup-control.png)
-
-Choose providers, configure workers, set the interface language/theme, and
-select the worker policy. Your saved profile is kept outside the repository.
-
-### Control confirmation
-
-![MAC Control confirmation screen](assets/control-finish.png)
-
-Review the selected providers, worker count, policy and appearance before
-saving. Use `q` to review the Finish page, then choose save, discard or cancel.
+- [Tiếng Việt](#tiếng-việt)
+- [English](#english)
 
 ## Tiếng Việt
 
-### Cài đặt
+### Dành cho người dùng
 
-```bash
-git clone https://github.com/Horaus/mac.git
-cd mac
-./scripts/bootstrap.sh .
-```
+#### 1. Cài đặt lần đầu
 
-Sau khi cài đặt, chạy `mac` từ bất kỳ Terminal nào. Lần đầu MAC mở màn hình
-thiết lập. Những lần sau vẫn chỉ cần dùng lệnh `mac`; cấu hình và dữ liệu chạy
-được giữ nguyên khi cập nhật.
+Chạy ba lệnh sau trong Terminal:
 
-### Kết nối ứng dụng AI
+    git clone https://github.com/Horaus/mac.git
+    cd mac
+    ./scripts/bootstrap.sh .
 
-MAC được gọi thông qua MCP. Sau khi cấu hình MAC MCP server trong ứng dụng AI,
-chỉ cần nhập:
+Sau khi cài đặt, mở MAC từ bất kỳ Terminal nào bằng:
 
-```text
-Kết nối tới MAC MCP server đã cài đặt trong project này.
-```
+    mac
 
-#### Cấu hình MCP
+Lần đầu MAC mở màn hình thiết lập. Những lần sau vẫn dùng lệnh
+<code>mac</code>; profile và dữ liệu được giữ nguyên khi cập nhật.
 
-Từ thư mục dự án MAC, với Codex CLI:
+#### 2. Kết nối với ứng dụng AI
 
-~~~bash
-codex mcp add mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
-codex mcp get mac
-~~~
+Mở thư mục project <code>mac</code> trong Codex, Claude, Gemini hoặc ứng dụng AI
+có hỗ trợ MCP. Sau đó gửi cho AI đúng một câu:
 
-Khởi động lại Codex. Với Codex app hoặc extension IDE, mở Settings, MCP
-servers, Add server rồi nhập cùng command, arguments và PYTHONPATH.
+    Đọc README của project này và kết nối tới MAC MCP server đã cài đặt.
 
-Với Claude Code:
+Phần còn lại dành cho AI agent ở ngay bên dưới. Người dùng không cần tự chép
+các lệnh MCP dài.
 
-~~~bash
-claude mcp add --scope user mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
-claude mcp get mac
-~~~
+#### 3. Cập nhật
 
-Khởi động lại Claude Code và kiểm tra bằng /mcp.
+    cd mac
+    git pull
+    ./scripts/bootstrap.sh .
 
-Với Gemini CLI, thêm server tên mac vào ~/.gemini/settings.json:
+### Dành cho AI agent
 
-~~~json
-{
-  "mcpServers": {
-    "mac": {
-      "command": "/ABSOLUTE/PATH/mac/.venv/bin/python",
-      "args": ["-m", "agent_control_plane", "mcp", "--state", "/ABSOLUTE/PATH/mac/.agent-control-plane/state.sqlite3"],
-      "env": {"PYTHONPATH": "/ABSOLUTE/PATH/mac/src"}
+Đây là hướng dẫn để AI agent tự thiết lập kết nối, không phải các bước người
+dùng phải nhập thủ công.
+
+1. Xác định thư mục gốc MAC đang mở và dùng đường dẫn tuyệt đối.
+2. Chọn cấu hình tương ứng với host hiện tại.
+3. Khởi động lại host nếu cấu hình MCP yêu cầu.
+4. Xác nhận MAC tools đã xuất hiện và gọi <code>control_status</code>.
+5. Nạp rule/knowledge MAC cung cấp, rồi hỏi người dùng mục tiêu, số worker và
+   kết quả cần đạt.
+
+#### Codex CLI, Codex app hoặc extension
+
+Từ thư mục gốc MAC:
+
+    codex mcp add mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
+    codex mcp get mac
+
+Codex app và extension dùng cùng cấu hình MCP. Nếu tool chưa xuất hiện, khởi
+động lại Codex rồi gọi <code>control_status</code>.
+
+#### Claude Code
+
+    claude mcp add --scope user mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
+    claude mcp get mac
+
+Khởi động lại Claude Code, kiểm tra bằng <code>/mcp</code>, rồi gọi
+<code>control_status</code>.
+
+#### Gemini CLI
+
+Thêm server <code>mac</code> vào <code>~/.gemini/settings.json</code>, thay
+<code>/ABSOLUTE/PATH/mac</code> bằng đường dẫn tuyệt đối của project:
+
+    {
+      "mcpServers": {
+        "mac": {
+          "command": "/ABSOLUTE/PATH/mac/.venv/bin/python",
+          "args": ["-m", "agent_control_plane", "mcp", "--state", "/ABSOLUTE/PATH/mac/.agent-control-plane/state.sqlite3"],
+          "env": {"PYTHONPATH": "/ABSOLUTE/PATH/mac/src"}
+        }
+      }
     }
-  }
-}
-~~~
 
-Thay các đường dẫn tuyệt đối, khởi động lại Gemini và kiểm tra mac cùng các
-tool đã hiển thị.
+Khởi động lại Gemini, xác nhận MAC tools xuất hiện, rồi gọi
+<code>control_status</code>.
 
-Sau khi kết nối, MAC tự nạp rule và knowledge; Master sẽ hỏi tiếp mục tiêu,
-số worker và kết quả cần đạt. Ứng dụng AI phải hiển thị MAC tool trước khi gọi
-được MAC; chỉ nhập prompt không thể tự kết nối process nếu MCP chưa cấu hình.
+## English
 
-### Cập nhật
+### For users
 
-```bash
-cd mac
-git pull
-./scripts/bootstrap.sh .
-```
+#### 1. First installation
 
-Thư mục cấu hình và dữ liệu được lưu ngoài checkout, vì vậy cập nhật source
-không ghi đè profile đã lưu.
+    git clone https://github.com/Horaus/mac.git
+    cd mac
+    ./scripts/bootstrap.sh .
 
-### Hình ảnh giao diện
+Open MAC later from any terminal with:
 
-![Menu chính của MAC](assets/main-menu.png)
+    mac
 
-Từ menu chính, bạn có thể mở thiết lập, xem trạng thái, đọc hướng dẫn Master,
-cập nhật và kiểm tra hệ thống.
+#### 2. Connect an AI application
 
-![Chọn provider CLI](assets/providers.png)
+Open the <code>mac</code> project in Codex, Claude, Gemini, or another
+MCP-compatible AI host. Send the AI this single sentence:
 
-Bạn có thể chọn một hoặc nhiều provider. Mỗi worker có thể dùng provider khác
-nhau; Codex và Gemini có thể chạy chung trong một profile.
+    Read this project's README and connect to the installed MAC MCP server.
 
-![Màn hình thiết lập và Control của MAC](assets/setup-control.png)
+The AI-specific setup is below; users do not need to copy the long MCP
+commands manually.
 
-Bạn có thể chọn provider, số worker, ngôn ngữ, màu giao diện và chính sách
-worker trong một luồng thiết lập duy nhất.
+#### 3. Update
 
-![Màn hình xác nhận Control của MAC](assets/control-finish.png)
+    cd mac
+    git pull
+    ./scripts/bootstrap.sh .
 
-Trước khi lưu, MAC hiển thị lại provider, số worker, chính sách và giao diện
-để bạn kiểm tra. Nhấn `q` để xem trang Hoàn tất, sau đó chọn lưu, bỏ thay đổi
-hoặc hủy.
+### For AI agents
 
-## Documentation / Tài liệu
+1. Resolve the absolute MAC project path.
+2. Configure the current host using the matching command above.
+3. Restart the host when required.
+4. Verify that MAC tools are visible and call <code>control_status</code>.
+5. Load the rules and knowledge supplied by MAC, then ask the user for the
+   goal, worker count, and expected result.
 
-- `docs/usage/quickstart.md`: first setup / thiết lập lần đầu.
-- `docs/integrations/master-chat.md`: MCP connection / kết nối MCP.
-- `docs/usage/safety-and-permissions.md`: permissions / quyền truy cập.
+## Interface preview
+
+<p align="center">
+  <img src="assets/main-menu.png" alt="MAC main menu" width="30%">
+  <img src="assets/providers.png" alt="MAC provider selection" width="30%">
+  <img src="assets/appearance.png" alt="MAC appearance settings" width="30%">
+</p>
+
+The screenshots are references only; language, colors, providers, and workers
+depend on the saved profile.
+
+## More documentation
+
+- <code>docs/usage/quickstart.md</code>
+- <code>docs/integrations/master-chat.md</code>
+- <code>docs/usage/safety-and-permissions.md</code>
