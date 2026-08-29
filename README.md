@@ -11,7 +11,7 @@ MAC connects an AI Master to local workers through MCP.
 
 #### 1. Cài đặt lần đầu
 
-Chạy ba lệnh sau trong Terminal:
+Chỉ chạy ba lệnh sau trong **Terminal** — không gửi chúng vào khung chat AI:
 
     git clone https://github.com/Horaus/mac.git
     cd mac
@@ -26,13 +26,21 @@ Lần đầu MAC mở màn hình thiết lập. Những lần sau vẫn dùng l�
 
 #### 2. Kết nối với ứng dụng AI
 
-Mở thư mục project <code>mac</code> trong Codex, Claude, Gemini hoặc ứng dụng AI
-có hỗ trợ MCP. Sau đó gửi cho AI đúng một câu:
+Terminal dùng để cài MAC; khung chat dùng để yêu cầu AI kết nối tới MAC qua
+MCP. Bạn có thể chat trong bất kỳ project nào, không cần mở thư mục
+<code>mac</code>.
 
-    Đọc README của project này và kết nối tới MAC MCP server đã cài đặt.
+Nếu AI chưa biết MAC, gửi câu này:
 
-Phần còn lại dành cho AI agent ở ngay bên dưới. Người dùng không cần tự chép
-các lệnh MCP dài.
+    Đọc README tại https://github.com/Horaus/mac và kết nối tới MAC MCP đã cài trên máy.
+
+Nếu ứng dụng AI đã nạp MAC MCP, chỉ cần gửi:
+
+    Kết nối MAC MCP và thực hiện yêu cầu sau: <yêu cầu>
+
+AI sẽ nạp quy tắc vận hành do MAC cung cấp và hỏi thêm thông tin khi cần.
+Phần cấu hình bên dưới dành cho AI agent đọc; người dùng không cần chép các
+lệnh MCP vào khung chat.
 
 #### 3. Cập nhật
 
@@ -94,6 +102,8 @@ Khởi động lại Gemini, xác nhận MAC tools xuất hiện, rồi gọi
 
 #### 1. First installation
 
+Run these commands only in a **terminal**—do not paste them into an AI chat:
+
     git clone https://github.com/Horaus/mac.git
     cd mac
     ./scripts/bootstrap.sh .
@@ -104,13 +114,20 @@ Open MAC later from any terminal with:
 
 #### 2. Connect an AI application
 
-Open the <code>mac</code> project in Codex, Claude, Gemini, or another
-MCP-compatible AI host. Send the AI this single sentence:
+The terminal installs MAC; the chat asks the AI to connect through MCP. You
+can chat from any project and do not need to open the <code>mac</code> folder.
 
-    Read this project's README and connect to the installed MAC MCP server.
+If the AI does not know MAC yet, send:
 
-The AI-specific setup is below; users do not need to copy the long MCP
-commands manually.
+    Read the README at https://github.com/Horaus/mac and connect to the MAC MCP server installed on this computer.
+
+If the AI host has already loaded MAC MCP, use only:
+
+    Connect to MAC MCP and complete this request: <request>
+
+The AI loads MAC's operating rules and asks for missing details when needed.
+The configuration below is for the AI agent to read; users do not paste those
+MCP commands into chat.
 
 #### 3. Update
 

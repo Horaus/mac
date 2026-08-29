@@ -5,13 +5,22 @@ chat hỗ trợ MCP stdio, hoặc có bridge tương thích. Việc model mang t
 Claude hay Gemini không tự tạo quyền truy cập; chính ứng dụng host phải nạp MCP
 server và cho phép gọi tool.
 
-## Prompt để AI gọi MAC
+## Hai nơi khác nhau
 
-Sau khi MCP đã được cài vào host, dán prompt sau vào khung chat:
+Các lệnh cài đặt chỉ chạy trong Terminal. Prompt dưới đây được gửi trong khung
+chat của Codex, Claude, Gemini hoặc host AI khác; cuộc trò chuyện có thể nằm ở
+bất kỳ project nào.
+
+Nếu agent chưa biết MAC, gửi:
 
 ```text
-Gọi MAC (Multi-Agent Control) qua MCP và làm việc theo toàn bộ hướng dẫn MAC
-cung cấp. Khi giao việc, nói rõ mục tiêu, số worker mong muốn và kết quả cần đạt.
+Đọc README tại https://github.com/Horaus/mac và kết nối tới MAC MCP đã cài trên máy.
+```
+
+Nếu host đã nạp MAC MCP, dùng câu ngắn:
+
+```text
+Kết nối MAC MCP và thực hiện yêu cầu sau: <yêu cầu>
 ```
 
 ## Luồng chuẩn sau khi đã kết nối
