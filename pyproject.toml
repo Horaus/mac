@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-control-plane"
+version = "0.1.0"
+description = "Local-first supervisor control plane for multi-agent software development"
+requires-python = ">=3.11"
+
+[project.scripts]
+acp = "agent_control_plane.cli:main"
+mac = "agent_control_plane.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

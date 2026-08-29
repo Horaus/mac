@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  LINK_DIR="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$LINK_DIR/$SOURCE" ;; esac
+done
+ROOT="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+  echo "Chưa cài MAC. Chạy lệnh cài đặt lần đầu trong README." >&2
+  exit 1
+fi
+export MAC_PROJECT_ROOT="$ROOT"
+exec "$PYTHON" -m agent_control_plane "$@"
