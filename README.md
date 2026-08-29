@@ -45,6 +45,16 @@ overwrite the saved profile.
 
 ### First setup screen
 
+![MAC main menu](assets/main-menu.png)
+
+From the main menu you can open setup, status, Master help, update and system
+check. The same menu is available every time you run `mac`.
+
+![MAC provider selection](assets/providers.png)
+
+Select one or more CLI providers. Different workers can use different
+providers; Codex and Gemini can run in the same profile.
+
 ![MAC setup and Control screen](assets/setup-control.png)
 
 Choose providers, configure workers, set the interface language/theme, and
@@ -98,6 +108,16 @@ Thư mục cấu hình và dữ liệu được lưu ngoài checkout, vì vậy 
 không ghi đè profile đã lưu.
 
 ### Hình ảnh giao diện
+
+![Menu chính của MAC](assets/main-menu.png)
+
+Từ menu chính, bạn có thể mở thiết lập, xem trạng thái, đọc hướng dẫn Master,
+cập nhật và kiểm tra hệ thống.
+
+![Chọn provider CLI](assets/providers.png)
+
+Bạn có thể chọn một hoặc nhiều provider. Mỗi worker có thể dùng provider khác
+nhau; Codex và Gemini có thể chạy chung trong một profile.
 
 ![Màn hình thiết lập và Control của MAC](assets/setup-control.png)
 
