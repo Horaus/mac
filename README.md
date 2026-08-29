@@ -43,6 +43,20 @@ git pull
 The setup and state directory is kept outside the checkout, so updates do not
 overwrite the saved profile.
 
+### First setup screen
+
+![MAC setup and Control screen](assets/setup-control.png)
+
+Choose providers, configure workers, set the interface language/theme, and
+select the worker policy. Your saved profile is kept outside the repository.
+
+### Control confirmation
+
+![MAC Control confirmation screen](assets/control-finish.png)
+
+Review the selected providers, worker count, policy and appearance before
+saving. Use `q` to review the Finish page, then choose save, discard or cancel.
+
 ## Tiếng Việt
 
 ### Cài đặt
@@ -82,6 +96,19 @@ git pull
 
 Thư mục cấu hình và dữ liệu được lưu ngoài checkout, vì vậy cập nhật source
 không ghi đè profile đã lưu.
+
+### Hình ảnh giao diện
+
+![Màn hình thiết lập và Control của MAC](assets/setup-control.png)
+
+Bạn có thể chọn provider, số worker, ngôn ngữ, màu giao diện và chính sách
+worker trong một luồng thiết lập duy nhất.
+
+![Màn hình xác nhận Control của MAC](assets/control-finish.png)
+
+Trước khi lưu, MAC hiển thị lại provider, số worker, chính sách và giao diện
+để bạn kiểm tra. Nhấn `q` để xem trang Hoàn tất, sau đó chọn lưu, bỏ thay đổi
+hoặc hủy.
 
 ## Documentation / Tài liệu
 
