@@ -19,12 +19,50 @@ later runs use the same command and preserve configuration and runtime data.
 
 ### Connect an AI host
 
-MAC is called through MCP. After installing and configuring it in Codex, Claude,
-Gemini or another MCP-compatible host, write only:
+MAC is called through MCP. After configuring the MAC MCP server in your AI
+host, write only:
 
 ```text
-Connect to MAC installed from Horaus/mac through MCP.
+Connect to the MAC MCP server installed in this project.
 ```
+
+#### Configure MCP
+
+From the MAC project directory, Codex CLI:
+
+~~~bash
+codex mcp add mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
+codex mcp get mac
+~~~
+
+Restart Codex. In the Codex app or IDE extension, open Settings, MCP servers,
+Add server, and enter the same Python command, arguments and PYTHONPATH.
+
+Claude Code:
+
+~~~bash
+claude mcp add --scope user mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
+claude mcp get mac
+~~~
+
+Restart Claude Code and verify with /mcp.
+
+Gemini CLI: add a server named mac to ~/.gemini/settings.json:
+
+~~~json
+{
+  "mcpServers": {
+    "mac": {
+      "command": "/ABSOLUTE/PATH/mac/.venv/bin/python",
+      "args": ["-m", "agent_control_plane", "mcp", "--state", "/ABSOLUTE/PATH/mac/.agent-control-plane/state.sqlite3"],
+      "env": {"PYTHONPATH": "/ABSOLUTE/PATH/mac/src"}
+    }
+  }
+}
+~~~
+
+Replace the absolute paths, restart Gemini, and verify that mac and its tools
+are visible.
 
 After connecting, MAC loads its rules and knowledge; the Master asks for the
 goal, worker count and expected result. The AI host must show MAC tools before
@@ -81,12 +119,50 @@ thiết lập. Những lần sau vẫn chỉ cần dùng lệnh `mac`; cấu hì
 
 ### Kết nối ứng dụng AI
 
-MAC được gọi thông qua MCP. Sau khi cài và cấu hình MAC với Codex, Claude,
-Gemini hoặc host hỗ trợ MCP khác, chỉ cần nhập:
+MAC được gọi thông qua MCP. Sau khi cấu hình MAC MCP server trong ứng dụng AI,
+chỉ cần nhập:
 
 ```text
-Kết nối tới MAC đã cài đặt từ Horaus/mac qua MCP.
+Kết nối tới MAC MCP server đã cài đặt trong project này.
 ```
+
+#### Cấu hình MCP
+
+Từ thư mục dự án MAC, với Codex CLI:
+
+~~~bash
+codex mcp add mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
+codex mcp get mac
+~~~
+
+Khởi động lại Codex. Với Codex app hoặc extension IDE, mở Settings, MCP
+servers, Add server rồi nhập cùng command, arguments và PYTHONPATH.
+
+Với Claude Code:
+
+~~~bash
+claude mcp add --scope user mac --env PYTHONPATH="$PWD/src" -- "$PWD/.venv/bin/python" -m agent_control_plane mcp --state "$PWD/.agent-control-plane/state.sqlite3"
+claude mcp get mac
+~~~
+
+Khởi động lại Claude Code và kiểm tra bằng /mcp.
+
+Với Gemini CLI, thêm server tên mac vào ~/.gemini/settings.json:
+
+~~~json
+{
+  "mcpServers": {
+    "mac": {
+      "command": "/ABSOLUTE/PATH/mac/.venv/bin/python",
+      "args": ["-m", "agent_control_plane", "mcp", "--state", "/ABSOLUTE/PATH/mac/.agent-control-plane/state.sqlite3"],
+      "env": {"PYTHONPATH": "/ABSOLUTE/PATH/mac/src"}
+    }
+  }
+}
+~~~
+
+Thay các đường dẫn tuyệt đối, khởi động lại Gemini và kiểm tra mac cùng các
+tool đã hiển thị.
 
 Sau khi kết nối, MAC tự nạp rule và knowledge; Master sẽ hỏi tiếp mục tiêu,
 số worker và kết quả cần đạt. Ứng dụng AI phải hiển thị MAC tool trước khi gọi
