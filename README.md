@@ -19,18 +19,16 @@ later runs use the same command and preserve configuration and runtime data.
 
 ### Connect an AI host
 
-MAC is called through MCP. After connecting it to Codex, Claude, Gemini or
-another MCP-compatible host, write:
+MAC is called through MCP. After installing and configuring it in Codex, Claude,
+Gemini or another MCP-compatible host, write only:
 
 ```text
-Call MAC (Multi-Agent Control) through MCP and follow all instructions provided by MAC.
-Goal: <what you want to achieve>
-Workers requested: <number>
-Expected result: <what must be delivered>
+Connect to MAC installed from Horaus/mac through MCP.
 ```
 
-The AI host must show the MAC tools before it can call MAC. A prompt alone
-cannot connect a local process that has not been configured as an MCP server.
+After connecting, MAC loads its rules and knowledge; the Master asks for the
+goal, worker count and expected result. The AI host must show MAC tools before
+it can call MAC. A prompt alone cannot connect an unconfigured local process.
 
 ### Update
 
@@ -83,18 +81,16 @@ thiết lập. Những lần sau vẫn chỉ cần dùng lệnh `mac`; cấu hì
 
 ### Kết nối ứng dụng AI
 
-MAC được gọi thông qua MCP. Sau khi kết nối MAC với Codex, Claude, Gemini hoặc
-host hỗ trợ MCP khác, nhập:
+MAC được gọi thông qua MCP. Sau khi cài và cấu hình MAC với Codex, Claude,
+Gemini hoặc host hỗ trợ MCP khác, chỉ cần nhập:
 
 ```text
-Gọi MAC (Multi-Agent Control) qua MCP và làm việc theo toàn bộ hướng dẫn MAC cung cấp.
-Mục tiêu: <mô tả việc cần làm>
-Số worker cần dùng: <số lượng>
-Kết quả cần đạt: <mô tả kết quả>
+Kết nối tới MAC đã cài đặt từ Horaus/mac qua MCP.
 ```
 
-Ứng dụng AI phải hiển thị các MAC tool trước khi gọi được MAC. Chỉ nhập prompt
-không thể tự kết nối một process cục bộ nếu MCP chưa được cấu hình.
+Sau khi kết nối, MAC tự nạp rule và knowledge; Master sẽ hỏi tiếp mục tiêu,
+số worker và kết quả cần đạt. Ứng dụng AI phải hiển thị MAC tool trước khi gọi
+được MAC; chỉ nhập prompt không thể tự kết nối process nếu MCP chưa cấu hình.
 
 ### Cập nhật
 
