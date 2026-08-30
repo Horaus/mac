@@ -53,6 +53,18 @@ def _fullscreen_setup(project: Path, found):
             "es": {"title":" AGENT CONTROL PLANE / CONFIGURACIÓN ","tabs":["Proveedores","Workers","Idioma","Tema","Finalizar"],"provider":"Seleccione uno o más CLI (Space alterna)","provider_note":"Codex y Gemini pueden usarse juntos, uno por worker.","workers_title":"Workers · n cantidad  a añadir  e editar  p proveedor  d borrar","workers_note":"El Master gestiona nombre, proveedor, rol y alcance.","language":"Idioma de la interfaz","language_prompt":"Seleccione el idioma utilizado en MAC:","choose":"↑↓ mover · Enter seleccionar","theme":"Tema de color","theme_prompt":"Seleccione la apariencia del terminal:","dark":"Oscuro","light":"Claro","finish":"Revisar y guardar","providers":"Proveedores","workers":"Workers","footer":"↑↓ elegir   ←→/Tab cambiar   q revisar y salir","exit":"¿Salir y guardar? [y] Sí [n] No [c] Cancelar"},
             "de": {"title":" AGENT CONTROL PLANE / EINRICHTUNG ","tabs":["Provider","Worker","Sprache","Design","Fertig"],"provider":"CLI auswählen (Space umschalten)","provider_note":"Codex und Gemini können gemeinsam pro Worker verwendet werden.","workers_title":"Worker · n Anzahl  a hinzufügen  e ändern  p Provider  d löschen","workers_note":"Der Master verwaltet Name, Provider, Rolle und Bereich.","language":"Oberflächensprache","language_prompt":"Sprache für MAC auswählen:","choose":"↑↓ bewegen · Enter wählen","theme":"Farbschema","theme_prompt":"Terminal-Darstellung auswählen:","dark":"Dunkel","light":"Hell","finish":"Prüfen und speichern","providers":"Provider","workers":"Worker","footer":"↑↓ wählen   ←→/Tab wechseln   q prüfen und beenden","exit":"Beenden und speichern? [y] Ja [n] Nein [c] Abbrechen"},
         }
+        control_text = {
+            "en": {"control":"Control","control_prompt":"Choose how workers are distributed among Masters:","lock":"Lock — fixed worker count; shortages remain PENDING and no extra workers are allocated","flexible":"Flexible — Masters adjust worker counts dynamically through MCP","control_note":"Flexible does not save chat history; Lock saves it by master_id + conversation_id.","policy":"Policy","role_label":"role","scope_label":"scope"},
+            "vi": {"control":"Điều phối","control_prompt":"Chọn cách phân phối worker giữa các Master:","lock":"Lock — số worker cố định; thiếu thì báo PENDING và từ chối cấp thêm","flexible":"Flexible — Master điều chỉnh số lượng worker tức thời qua MCP","control_note":"Flexible không lưu lịch sử chat; Lock lưu theo master_id + conversation_id.","policy":"Chính sách","role_label":"vai trò","scope_label":"phạm vi"},
+            "zh": {"control":"控制","control_prompt":"选择在各 Master 之间分配工作者的方式：","lock":"Lock — 工作者数量固定；不足时保持 PENDING，不再额外分配","flexible":"Flexible — Master 可通过 MCP 动态调整工作者数量","control_note":"Flexible 不保存聊天历史；Lock 按 master_id + conversation_id 保存。","policy":"策略","role_label":"角色","scope_label":"范围"},
+            "ja": {"control":"制御","control_prompt":"Master 間でのワーカー配分方法を選択：","lock":"Lock — ワーカー数を固定し、不足時は PENDING のまま追加配分しない","flexible":"Flexible — Master が MCP 経由でワーカー数を動的に調整","control_note":"Flexible はチャット履歴を保存しません。Lock は master_id + conversation_id 単位で保存します。","policy":"ポリシー","role_label":"役割","scope_label":"範囲"},
+            "ko": {"control":"제어","control_prompt":"Master 간 워커 분배 방식을 선택하세요:","lock":"Lock — 워커 수 고정; 부족하면 PENDING으로 두고 추가 할당하지 않음","flexible":"Flexible — Master가 MCP를 통해 워커 수를 동적으로 조정","control_note":"Flexible은 채팅 기록을 저장하지 않으며, Lock은 master_id + conversation_id별로 저장합니다.","policy":"정책","role_label":"역할","scope_label":"범위"},
+            "fr": {"control":"Contrôle","control_prompt":"Choisissez la répartition des workers entre les Masters :","lock":"Lock — nombre de workers fixe ; en cas de manque, état PENDING sans allocation supplémentaire","flexible":"Flexible — les Masters ajustent dynamiquement le nombre de workers via MCP","control_note":"Flexible n’enregistre pas l’historique du chat ; Lock l’enregistre par master_id + conversation_id.","policy":"Politique","role_label":"rôle","scope_label":"portée"},
+            "es": {"control":"Control","control_prompt":"Elija cómo distribuir los workers entre los Masters:","lock":"Lock — cantidad fija de workers; si faltan, queda PENDING y no asigna más","flexible":"Flexible — los Masters ajustan dinámicamente la cantidad de workers mediante MCP","control_note":"Flexible no guarda el historial del chat; Lock lo guarda por master_id + conversation_id.","policy":"Política","role_label":"rol","scope_label":"alcance"},
+            "de": {"control":"Steuerung","control_prompt":"Verteilung der Worker auf die Master auswählen:","lock":"Lock — feste Worker-Anzahl; bei Mangel PENDING und keine zusätzliche Zuteilung","flexible":"Flexible — Master passen die Worker-Anzahl dynamisch über MCP an","control_note":"Flexible speichert keinen Chatverlauf; Lock speichert nach master_id + conversation_id.","policy":"Richtlinie","role_label":"Rolle","scope_label":"Bereich"},
+        }
+        for code, values in control_text.items():
+            translations[code].update(values)
         fields = {
             "en": ("Worker name", "CLI provider", "Role", "Scope / location", "Worker count"),
             "vi": ("Tên worker", "CLI provider", "Vai trò", "Phạm vi / vị trí", "Số lượng worker"),
@@ -90,7 +102,7 @@ def _fullscreen_setup(project: Path, found):
             stdscr.erase(); h, w = stdscr.getmaxyx()
             title = text["title"]
             stdscr.addstr(1, 2, title[:w-4], curses.A_BOLD)
-            tabs = [text["tabs"][0], text["tabs"][1], appearance_names.get(language, "Appearance"), "Control", text["tabs"][-1]]
+            tabs = [text["tabs"][0], text["tabs"][1], appearance_names.get(language, "Appearance"), text["control"], text["tabs"][-1]]
             x = 2
             for i, tab in enumerate(tabs):
                 attr = active_attr if i == page else curses.A_BOLD
@@ -105,7 +117,7 @@ def _fullscreen_setup(project: Path, found):
             elif page == 1:
                 stdscr.addstr(5, 4, text["workers_title"], curses.A_BOLD)
                 for i, worker in enumerate(workers):
-                    line = f"{worker['id']:<18} {worker['provider']:<8} role={worker['role']:<18} scope={worker['scope']}"
+                    line = f"{worker['id']:<18} {worker['provider']:<8} {text['role_label']}={worker['role']:<18} {text['scope_label']}={worker['scope']}"
                     stdscr.addstr(7+i, 4, line[:w-8], active_attr if i == cursor else 0)
                 stdscr.addstr(9+len(workers), 4, text["workers_note"], curses.A_DIM)
             elif page == 2:
@@ -119,18 +131,19 @@ def _fullscreen_setup(project: Path, found):
                     stdscr.addstr(19+i, 8, ("●" if theme == code else "○") + "  " + label, active_attr if cursor == len(languages)+i else 0)
                 stdscr.addstr(21, 6, text["choose"], curses.A_DIM)
             elif page == 3:
-                stdscr.addstr(5, 4, "Control", curses.A_BOLD)
-                stdscr.addstr(7, 6, "Chọn cách phân phối worker giữa các Master:")
-                options = [("lock", "Lock — số worker cố định; thiếu thì báo PENDING và từ chối cấp thêm"), ("flexible", "Flexible — Master điều chỉnh số lượng worker tức thời qua MCP")]
+                stdscr.addstr(5, 4, text["control"], curses.A_BOLD)
+                stdscr.addstr(7, 6, text["control_prompt"])
+                options = [("lock", text["lock"]), ("flexible", text["flexible"])]
                 for i, (code, label) in enumerate(options): stdscr.addstr(9+i, 8, ("●" if control.get("policy") == code else "○") + "  " + label, active_attr if i == cursor else 0)
-                stdscr.addstr(13, 6, "Flexible không lưu lịch sử chat; Lock lưu theo master_id + conversation_id.", curses.A_DIM)
+                stdscr.addstr(13, 6, text["control_note"], curses.A_DIM)
             else:
                 stdscr.addstr(5, 4, text["finish"], curses.A_BOLD)
                 stdscr.addstr(7, 6, text["providers"] + ": " + ", ".join(sorted(enabled)))
                 stdscr.addstr(8, 6, text["workers"] + ":   " + str(len(workers)))
                 stdscr.addstr(9, 6, text["language"] + ": " + dict(languages)[language])
                 stdscr.addstr(10, 6, text["theme"] + ": " + text[theme])
-                for i, x in enumerate(workers): stdscr.addstr(12+i, 6, f"{x['id']} → {x['provider']} / {x['role']} / {x['scope']}")
+                stdscr.addstr(11, 6, text["policy"] + ": " + control.get("policy", "lock"))
+                for i, x in enumerate(workers): stdscr.addstr(13+i, 6, f"{x['id']} → {x['provider']} / {x['role']} / {x['scope']}")
                 if confirm: stdscr.addstr(h-4, 2, text["exit"], curses.A_BOLD | curses.A_STANDOUT)
                 stdscr.addstr(h-3, 2, message[:w-4], curses.A_DIM)
             stdscr.addstr(h-1, 2, text["footer"], curses.A_DIM)
@@ -146,10 +159,10 @@ def _fullscreen_setup(project: Path, found):
                 confirm = True
             if key in (9, curses.KEY_RIGHT):
                 page = (page + 1) % 5
-                cursor = [code for code, _ in languages].index(language) if page == 2 else (0 if theme == "dark" else 1) if page == 3 else 0
+                cursor = [code for code, _ in languages].index(language) if page == 2 else (0 if control.get("policy") == "lock" else 1) if page == 3 else 0
             elif key == curses.KEY_LEFT:
                 page = (page - 1) % 5
-                cursor = [code for code, _ in languages].index(language) if page == 2 else (0 if theme == "dark" else 1) if page == 3 else 0
+                cursor = [code for code, _ in languages].index(language) if page == 2 else (0 if control.get("policy") == "lock" else 1) if page == 3 else 0
             elif key in (curses.KEY_DOWN, ord('j')): cursor += 1; cursor %= max(1, len(providers) if page == 0 else len(languages)+2 if page == 2 else 2 if page == 3 else len(workers))
             elif key in (curses.KEY_UP, ord('k')): cursor -= 1; cursor %= max(1, len(providers) if page == 0 else len(languages)+2 if page == 2 else 2 if page == 3 else len(workers))
             elif page == 0 and key == ord(' '): enabled.symmetric_difference_update({providers[cursor]})
@@ -178,7 +191,7 @@ def _fullscreen_setup(project: Path, found):
                 else: theme = ("dark", "light")[cursor-len(languages)]
             elif page == 3 and key in (curses.KEY_ENTER, 10, 13): control["policy"] = ("lock", "flexible")[cursor]
             elif page == 4 and key in (10, 13):
-                stdscr.addstr(h-4, 2, "Thoát, bạn có muốn lưu không? [y] Lưu  [n] Không lưu  [c] Hủy "); stdscr.refresh()
+                stdscr.addstr(h-4, 2, text["exit"][:w-4]); stdscr.refresh()
                 answer = stdscr.getch()
                 if answer in (ord('y'), ord('Y')): return enabled, workers, language, theme, control
                 if answer in (ord('n'), ord('N')): return False
@@ -225,7 +238,7 @@ def run_setup(project: str | Path) -> Path:
     for i in range(count):
         default = f"worker-{i+1}"
         workers.append({"id": _ask(f"Tên worker {i+1}", default), "provider": provider})
-    config = {"version": 1, "project": str(project), "providers": [provider], "language": "en", "theme": "dark", "boss": {"knowledge_required": True, "history_linked": True}, "workers": workers}
+    config = {"version": 1, "project": str(project), "providers": [provider], "language": "en", "theme": "dark", "control": {"policy": "lock"}, "boss": {"knowledge_required": True, "history_linked": True}, "workers": workers}
     target = state_dir / "config.json"
     target.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
     print(f"\n{_GREEN}✓ Đã lưu{_RESET} {target}")
