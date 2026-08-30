@@ -11,23 +11,20 @@ MAC connects an AI Master to local workers through MCP.
 
 #### 1. Cài đặt lần đầu
 
-Chỉ chạy ba lệnh sau trong **Terminal** — không gửi chúng vào khung chat AI:
+Chạy lệnh sau trên **Terminal**
 
     git clone https://github.com/Horaus/mac.git
     cd mac
     ./scripts/bootstrap.sh .
 
-Sau khi cài đặt, mở MAC từ bất kỳ Terminal nào bằng:
+Sau khi cài đặt, mở MAC để thiết lập, sử dụng lệnh:
 
     mac
 
-Lần đầu MAC mở màn hình thiết lập. Những lần sau vẫn dùng lệnh
-<code>mac</code>; profile và dữ liệu được giữ nguyên khi cập nhật.
 
 #### 2. Kết nối với ứng dụng AI
 
-Terminal dùng để cài MAC; khung chat dùng để yêu cầu AI kết nối tới MAC qua
-MCP. Bạn có thể chat trong bất kỳ project nào, không cần mở thư mục
+Terminal dùng để cài MAC; sử dụng khung chat để yêu cầu AI kết nối tới MAC qua MCP và thực hiện các tuyyf chọn cần thiết. Bạn có thể chat trong bất kỳ project nào, không cần mở thư mục
 <code>mac</code>.
 
 Nếu AI chưa biết MAC, gửi câu này:
@@ -38,9 +35,8 @@ Nếu ứng dụng AI đã nạp MAC MCP, chỉ cần gửi:
 
     Kết nối MAC MCP và thực hiện yêu cầu sau: <yêu cầu>
 
-AI sẽ nạp quy tắc vận hành do MAC cung cấp và hỏi thêm thông tin khi cần.
-Phần cấu hình bên dưới dành cho AI agent đọc; người dùng không cần chép các
-lệnh MCP vào khung chat.
+AI sẽ nạp quy tắc vận hành do MAC cung cấp và hỏi thêm thông tin khi cần. Quá ttrinhf ày diễn ra tự động
+Phần cấu hình bên dưới dành cho AI agent đọc; người dùng không cần chép các lệnh MCP vào khung chat.
 
 #### 3. Cập nhật
 
@@ -48,6 +44,7 @@ lệnh MCP vào khung chat.
     git pull
     ./scripts/bootstrap.sh .
 
+Hoặc cập nhập trực tiếp trong menu MAC khi gọi lệnh "mac" trên Terminal
 ### Dành cho AI agent
 
 Đây là hướng dẫn để AI agent tự thiết lập kết nối, không phải các bước người
@@ -102,20 +99,21 @@ Khởi động lại Gemini, xác nhận MAC tools xuất hiện, rồi gọi
 
 #### 1. First installation
 
-Run these commands only in a **terminal**—do not paste them into an AI chat:
+Run the following commands in **Terminal**:
 
     git clone https://github.com/Horaus/mac.git
     cd mac
     ./scripts/bootstrap.sh .
 
-Open MAC later from any terminal with:
+After installation, open MAC to configure it with:
 
     mac
 
 #### 2. Connect an AI application
 
-The terminal installs MAC; the chat asks the AI to connect through MCP. You
-can chat from any project and do not need to open the <code>mac</code> folder.
+The terminal is used to install MAC. In the chat, ask the AI to connect to MAC
+through MCP and carry out the necessary options. You can chat from any project;
+you do not need to open the <code>mac</code> folder.
 
 If the AI does not know MAC yet, send:
 
@@ -126,14 +124,17 @@ If the AI host has already loaded MAC MCP, use only:
     Connect to MAC MCP and complete this request: <request>
 
 The AI loads MAC's operating rules and asks for missing details when needed.
-The configuration below is for the AI agent to read; users do not paste those
-MCP commands into chat.
+This process happens automatically. The configuration below is for the AI
+agent to read; users do not paste those MCP commands into chat.
 
 #### 3. Update
 
     cd mac
     git pull
     ./scripts/bootstrap.sh .
+
+You can also update directly from the MAC menu after running <code>mac</code>
+in Terminal.
 
 ### For AI agents
 
