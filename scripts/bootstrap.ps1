@@ -32,10 +32,11 @@ if (-not (Test-Path (Join-Path $Root ".agent-control-plane\config.json"))) {
 $Bin = Join-Path $HOME ".mac\bin"
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 $Launcher = Join-Path $Bin "mac.cmd"
-@"
-@echo off
-"$VenvPython" -m agent_control_plane %*
-"@ | Set-Content -Encoding ASCII $Launcher
+$LauncherLines = @(
+    "@echo off"
+    ([char]34 + $VenvPython + [char]34 + " -m agent_control_plane %*")
+)
+Set-Content -Encoding ASCII -Path $Launcher -Value $LauncherLines
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $Entries = @($UserPath -split ";" | Where-Object { $_ })
