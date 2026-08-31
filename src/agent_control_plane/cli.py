@@ -16,7 +16,12 @@ from .store import Store
 from .setup import connect_codex, doctor, run_setup, show_config, show_mcp_config
 
 def _menu(project="."):
-    import curses
+    try:
+        import curses
+    except (ImportError, ModuleNotFoundError):
+        # Windows Python does not ship curses. Use line-based setup instead.
+        run_setup(project)
+        return 0
     def keypress(win):
         key = win.getch()
         if key == ord("["):
