@@ -25,6 +25,8 @@ Sau khi cài đặt, mở MAC để thiết lập, sử dụng lệnh:
 
 Windows không chạy trực tiếp file Bash. Trong PowerShell, dùng:
 
+    git clone https://github.com/Horaus/mac.git
+    cd mac
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
@@ -123,6 +125,8 @@ After installation, open MAC to configure it with:
 
 Windows does not run Bash files directly. In PowerShell, use:
 
+    git clone https://github.com/Horaus/mac.git
+    cd mac
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 When the script finishes, open a new PowerShell window and run:
