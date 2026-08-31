@@ -58,12 +58,19 @@ if (-not (Test-Path (Join-Path $Root ".agent-control-plane\config.json"))) {
 
 $Bin = Join-Path $HOME ".mac\bin"
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
-$Launcher = Join-Path $Bin "mac.cmd"
 $LauncherLines = @(
     "@echo off"
     ([char]34 + $VenvPython + [char]34 + " -m agent_control_plane %*")
 )
-Set-Content -Encoding ASCII -Path $Launcher -Value $LauncherLines
+$LauncherPaths = @(
+    (Join-Path $Bin "mac.cmd"),
+    (Join-Path $HOME ".local\bin\mac.cmd")
+)
+foreach ($Launcher in $LauncherPaths) {
+    $LauncherDirectory = Split-Path $Launcher -Parent
+    New-Item -ItemType Directory -Force -Path $LauncherDirectory | Out-Null
+    Set-Content -Encoding ASCII -Path $Launcher -Value $LauncherLines
+}
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $Entries = @($UserPath -split ";" | Where-Object { $_ })
