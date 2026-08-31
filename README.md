@@ -21,6 +21,16 @@ Sau khi cài đặt, mở MAC để thiết lập, sử dụng lệnh:
 
     mac
 
+##### Windows 10 (PowerShell)
+
+Windows không chạy trực tiếp file Bash. Trong PowerShell, dùng:
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
+
+    mac
+
 
 #### 2. Kết nối với ứng dụng AI
 
@@ -106,6 +116,16 @@ Run the following commands in **Terminal**:
     ./scripts/bootstrap.sh .
 
 After installation, open MAC to configure it with:
+
+    mac
+
+##### Windows 10 (PowerShell)
+
+Windows does not run Bash files directly. In PowerShell, use:
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+When the script finishes, open a new PowerShell window and run:
 
     mac
 
