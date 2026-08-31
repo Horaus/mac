@@ -6,12 +6,12 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$UvCommand = Join-Path $HOME ".local\bin\uv.exe"
+if (-not (Test-Path $UvCommand)) {
+    $uv = Get-Command uv.exe -ErrorAction SilentlyContinue
+    if ($uv) { $UvCommand = $uv.Source }
+}
 if (-not (Test-Path $VenvPython)) {
-    $UvCommand = Join-Path $HOME ".local\bin\uv.exe"
-    if (-not (Test-Path $UvCommand)) {
-        $uv = Get-Command uv.exe -ErrorAction SilentlyContinue
-        if ($uv) { $UvCommand = $uv.Source }
-    }
     if (Test-Path $UvCommand) {
         Write-Host "No system Python found; using uv-managed Python 3.12."
         & $UvCommand venv --python 3.12 (Join-Path $Root ".venv")
@@ -34,12 +34,24 @@ if (-not (Test-Path $VenvPython)) {
 if (-not (Test-Path $VenvPython)) {
     throw "The Python virtual environment could not be created. Install Python 3.11+ or uv, then run this script again."
 }
-& $VenvPython -m pip install --upgrade pip
-& $VenvPython -m pip install -e $Root
+if (Test-Path $UvCommand) {
+    & $UvCommand pip install --python $VenvPython -e $Root
+} else {
+    & $VenvPython -m pip install -e $Root
+}
+if ($LASTEXITCODE -ne 0) {
+    throw "MAC package installation failed. Check Python/uv output and run the installer again."
+}
 & $VenvPython -m agent_control_plane --project $Root init
+if ($LASTEXITCODE -ne 0) {
+    throw "MAC initialization failed. Run the installer again after fixing the reported error."
+}
 
 if (-not (Test-Path (Join-Path $Root ".agent-control-plane\config.json"))) {
     & $VenvPython -m agent_control_plane --project $Root setup
+    if ($LASTEXITCODE -ne 0) {
+        throw "MAC setup failed. Fix the reported error and run the installer again."
+    }
 } else {
     Write-Host "Keeping the existing MAC configuration. Run 'mac' to edit it if needed."
 }
