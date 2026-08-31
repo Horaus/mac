@@ -31,10 +31,11 @@ Sau khi cài đặt, mở MAC để thiết lập, sử dụng lệnh:
 
 ##### Windows 10 (PowerShell)
 
-Windows không chạy trực tiếp file Bash. Trong PowerShell, dùng:
+Windows không chạy trực tiếp file Bash. Mở PowerShell tại thư mục bất kỳ
+(không cần đứng sẵn trong thư mục <code>mac</code>) và dùng:
 
-    git clone https://github.com/Horaus/mac.git
-    cd mac
+    Set-Location $HOME
+    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
@@ -45,8 +46,8 @@ Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
 
 Windows 11 dùng cùng bộ lệnh PowerShell:
 
-    git clone https://github.com/Horaus/mac.git
-    cd mac
+    Set-Location $HOME
+    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
@@ -162,8 +163,8 @@ After installation, open MAC to configure it with:
 
 Windows does not run Bash files directly. In PowerShell, use:
 
-    git clone https://github.com/Horaus/mac.git
-    cd mac
+    Set-Location $HOME
+    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 When the script finishes, open a new PowerShell window and run:
@@ -174,8 +175,8 @@ When the script finishes, open a new PowerShell window and run:
 
 Windows 11 uses the same PowerShell commands:
 
-    git clone https://github.com/Horaus/mac.git
-    cd mac
+    Set-Location $HOME
+    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 When the script finishes, open a new PowerShell window and run:
