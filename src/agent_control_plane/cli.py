@@ -178,7 +178,7 @@ def state_path(project: str) -> Path:
 def main(argv=None) -> int:
     if not (sys.argv[1:] if argv is None else argv): return _menu(os.environ.get("MAC_PROJECT_ROOT", "."))
     parser = argparse.ArgumentParser(prog="acp")
-    parser.add_argument("--project", default=".")
+    parser.add_argument("--project", default=os.environ.get("MAC_PROJECT_ROOT", "."))
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("setup", help="interactive first-run terminal setup")
