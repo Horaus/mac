@@ -56,6 +56,17 @@ PowerShell mới, rồi chạy:
 
     mac
 
+Nếu trước đó đã gặp lỗi <code>The string is missing the terminator</code>, đó
+là file installer cũ. Không chạy lại file cũ; cập nhật clone trước:
+
+    Set-Location $HOME
+    Set-Location .\mac
+    git pull origin main
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+Sau khi installer hoàn tất, đóng PowerShell này, mở PowerShell mới rồi chạy
+<code>mac</code>.
+
 ##### macOS hoặc Linux (Terminal)
 
     git clone https://github.com/Horaus/mac.git
@@ -187,6 +198,18 @@ When the installer reports completion, you must close the current PowerShell
 window, open a new PowerShell window, and then run:
 
     mac
+
+If you previously saw <code>The string is missing the terminator</code>, you
+are running an old installer. Do not run that old file again; update the clone
+first:
+
+    Set-Location $HOME
+    Set-Location .\mac
+    git pull origin main
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+After the installer finishes, close that PowerShell window, open a new one,
+and run <code>mac</code>.
 
 ##### macOS or Linux (Terminal)
 
