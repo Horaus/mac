@@ -5,19 +5,20 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 
-function Find-Python {
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) { return @("py", "-3") }
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) { return @("python") }
+$PythonCommand = $null
+$PythonArgs = @()
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    $PythonCommand = "py"
+    $PythonArgs = @("-3")
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    $PythonCommand = "python"
+} else {
     throw "Python 3.11 or newer is required. Install it from https://www.python.org/downloads/windows/ and run this script again."
 }
 
-$Python = Find-Python
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
-    if ($Python.Length -gt 1) { & $Python[0] $Python[1] -m venv (Join-Path $Root ".venv") }
-    else { & $Python[0] -m venv (Join-Path $Root ".venv") }
+    & $PythonCommand @PythonArgs -m venv (Join-Path $Root ".venv")
 }
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -e $Root
