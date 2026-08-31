@@ -26,7 +26,7 @@ if (-not (Test-Path $VenvPython)) {
 if (-not (Test-Path (Join-Path $Root ".agent-control-plane\config.json"))) {
     & $VenvPython -m agent_control_plane --project $Root setup
 } else {
-    Write-Host "Giữ nguyên cấu hình MAC hiện có. Mở 'mac' để chỉnh nếu cần."
+    Write-Host "Keeping the existing MAC configuration. Run 'mac' to edit it if needed."
 }
 
 $Bin = Join-Path $HOME ".mac\bin"
@@ -46,5 +46,5 @@ if ($Entries -notcontains $Bin) {
 $env:Path = "$Bin;$env:Path"
 
 Write-Host ""
-Write-Host "MAC đã cài đặt thành công cho Windows."
-Write-Host "Đóng cửa sổ PowerShell này, mở một cửa sổ mới, rồi chạy: mac"
+Write-Host "MAC was installed successfully on Windows."
+Write-Host "Close this PowerShell window, open a new one, then run: mac"
