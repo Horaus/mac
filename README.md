@@ -29,28 +29,30 @@ Sau khi cài đặt, mở MAC để thiết lập, sử dụng lệnh:
   trong khi Windows 7 không chạy được phiên bản Python này. Hãy nâng cấp
   Windows hoặc cài MAC trên máy Linux/macOS.
 
-##### Windows 10 (PowerShell)
+##### Windows 10 và Windows 11 (PowerShell)
 
-Windows không chạy trực tiếp file Bash. Mở PowerShell tại thư mục bất kỳ
-(không cần đứng sẵn trong thư mục <code>mac</code>) và dùng:
+Windows không chạy trực tiếp file Bash. Mở PowerShell tại thư mục bất kỳ;
+không cần đứng sẵn trong thư mục <code>mac</code>.
 
-    Set-Location $HOME
-    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
-    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
-
-Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
-
-    mac
-
-##### Windows 11 (PowerShell)
-
-Windows 11 dùng cùng bộ lệnh PowerShell:
+**Cài lần đầu — chạy đủ 4 lệnh theo thứ tự:**
 
     Set-Location $HOME
-    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
+    git clone https://github.com/Horaus/mac.git
+    Set-Location .\mac
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
-Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
+**Nếu thư mục <code>mac</code> đã tồn tại — chạy đủ 3 lệnh theo thứ tự:**
+
+    Set-Location $HOME
+    Set-Location .\mac
+    git pull
+
+Sau đó chạy installer (cả cài mới và cập nhật):
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+Khi installer báo hoàn tất, bắt buộc đóng PowerShell hiện tại, mở một
+PowerShell mới, rồi chạy:
 
     mac
 
@@ -159,27 +161,30 @@ After installation, open MAC to configure it with:
 - **Windows 7:** not officially supported. MAC requires Python 3.11+, which
   cannot run on Windows 7. Upgrade Windows or run MAC on Linux/macOS.
 
-##### Windows 10 (PowerShell)
+##### Windows 10 and Windows 11 (PowerShell)
 
-Windows does not run Bash files directly. In PowerShell, use:
+Windows does not run Bash files directly. Open PowerShell in any directory;
+you do not need to start inside the <code>mac</code> folder.
 
-    Set-Location $HOME
-    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
-    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
-
-When the script finishes, open a new PowerShell window and run:
-
-    mac
-
-##### Windows 11 (PowerShell)
-
-Windows 11 uses the same PowerShell commands:
+**First installation — run all 4 commands in order:**
 
     Set-Location $HOME
-    if (Test-Path .\mac\.git) { Set-Location .\mac; git pull } else { git clone https://github.com/Horaus/mac.git; Set-Location .\mac }
+    git clone https://github.com/Horaus/mac.git
+    Set-Location .\mac
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
-When the script finishes, open a new PowerShell window and run:
+**If the <code>mac</code> folder already exists — run all 3 commands in order:**
+
+    Set-Location $HOME
+    Set-Location .\mac
+    git pull
+
+Then run the installer (for both first installation and updates):
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+When the installer reports completion, you must close the current PowerShell
+window, open a new PowerShell window, and then run:
 
     mac
 

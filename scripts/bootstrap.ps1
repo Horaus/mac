@@ -47,5 +47,4 @@ $env:Path = "$Bin;$env:Path"
 
 Write-Host ""
 Write-Host "MAC đã cài đặt thành công cho Windows."
-Write-Host "Mở MAC trong cửa sổ PowerShell hiện tại bằng: mac"
-Write-Host "Nếu cửa sổ hiện tại chưa nhận PATH, mở PowerShell mới rồi chạy: mac"
+Write-Host "Đóng cửa sổ PowerShell này, mở một cửa sổ mới, rồi chạy: mac"
