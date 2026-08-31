@@ -29,7 +29,12 @@ def _scan_providers():
 def _fullscreen_setup(project: Path, found):
     """A small stdlib-only setup editor. It deliberately models workers as rows,
     rather than assigning one fixed role to each worker."""
-    import curses
+    try:
+        import curses
+    except (ImportError, ModuleNotFoundError):
+        # Windows Python does not ship the curses module; use the line-based
+        # setup below instead of failing after the installer has created venv.
+        return None
 
     def ask(stdscr, label, default=""):
         curses.echo()
