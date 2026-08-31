@@ -12,13 +12,18 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
     $PythonArgs = @("-3")
 } elseif (Get-Command python -ErrorAction SilentlyContinue) {
     $PythonCommand = "python"
-} else {
-    throw "Python 3.11 or newer is required. Install it from https://www.python.org/downloads/windows/ and run this script again."
 }
 
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
-    & $PythonCommand @PythonArgs -m venv (Join-Path $Root ".venv")
+    if ($PythonCommand) {
+        & $PythonCommand @PythonArgs -m venv (Join-Path $Root ".venv")
+    } elseif (Get-Command uv -ErrorAction SilentlyContinue) {
+        Write-Host "No system Python found; using uv-managed Python 3.12."
+        & uv venv --python 3.12 (Join-Path $Root ".venv")
+    } else {
+        throw "Python 3.11 or newer, or uv, is required. Install Python or uv and run this script again."
+    }
 }
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -e $Root
