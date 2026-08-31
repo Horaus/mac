@@ -58,11 +58,7 @@ if (-not (Test-Path (Join-Path $Root ".agent-control-plane\config.json"))) {
 
 $Bin = Join-Path $HOME ".mac\bin"
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
-$LauncherLines = @(
-    "@echo off"
-    ("set MAC_PROJECT_ROOT=" + $Root)
-    ([char]34 + $VenvPython + [char]34 + " -m agent_control_plane %*")
-)
+$LauncherLines = @("@echo off", "set MAC_PROJECT_ROOT=$Root", ([char]34 + $VenvPython + [char]34 + " -m agent_control_plane %*"))
 $LauncherPaths = @(
     (Join-Path $Bin "mac.cmd"),
     (Join-Path $HOME ".local\bin\mac.cmd")
