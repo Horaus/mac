@@ -21,6 +21,14 @@ Sau khi cài đặt, mở MAC để thiết lập, sử dụng lệnh:
 
     mac
 
+##### Hệ điều hành được hỗ trợ
+
+- **Windows 10 và Windows 11:** dùng PowerShell và <code>bootstrap.ps1</code>.
+- **macOS và Linux:** dùng Terminal và <code>bootstrap.sh</code>.
+- **Windows 7:** chưa được hỗ trợ chính thức. MAC yêu cầu Python 3.11+,
+  trong khi Windows 7 không chạy được phiên bản Python này. Hãy nâng cấp
+  Windows hoặc cài MAC trên máy Linux/macOS.
+
 ##### Windows 10 (PowerShell)
 
 Windows không chạy trực tiếp file Bash. Trong PowerShell, dùng:
@@ -30,6 +38,28 @@ Windows không chạy trực tiếp file Bash. Trong PowerShell, dùng:
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
+
+    mac
+
+##### Windows 11 (PowerShell)
+
+Windows 11 dùng cùng bộ lệnh PowerShell:
+
+    git clone https://github.com/Horaus/mac.git
+    cd mac
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+Sau khi script hoàn tất, mở PowerShell mới rồi chạy:
+
+    mac
+
+##### macOS hoặc Linux (Terminal)
+
+    git clone https://github.com/Horaus/mac.git
+    cd mac
+    ./scripts/bootstrap.sh .
+
+Sau khi script hoàn tất, mở Terminal mới (nếu cần) rồi chạy:
 
     mac
 
@@ -121,6 +151,13 @@ After installation, open MAC to configure it with:
 
     mac
 
+##### Supported operating systems
+
+- **Windows 10 and Windows 11:** use PowerShell and <code>bootstrap.ps1</code>.
+- **macOS and Linux:** use Terminal and <code>bootstrap.sh</code>.
+- **Windows 7:** not officially supported. MAC requires Python 3.11+, which
+  cannot run on Windows 7. Upgrade Windows or run MAC on Linux/macOS.
+
 ##### Windows 10 (PowerShell)
 
 Windows does not run Bash files directly. In PowerShell, use:
@@ -130,6 +167,28 @@ Windows does not run Bash files directly. In PowerShell, use:
     powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 When the script finishes, open a new PowerShell window and run:
+
+    mac
+
+##### Windows 11 (PowerShell)
+
+Windows 11 uses the same PowerShell commands:
+
+    git clone https://github.com/Horaus/mac.git
+    cd mac
+    powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+When the script finishes, open a new PowerShell window and run:
+
+    mac
+
+##### macOS or Linux (Terminal)
+
+    git clone https://github.com/Horaus/mac.git
+    cd mac
+    ./scripts/bootstrap.sh .
+
+When the script finishes, open a new Terminal window if needed, then run:
 
     mac
 
