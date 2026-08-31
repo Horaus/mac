@@ -5,25 +5,34 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 
-$PythonCommand = $null
-$PythonArgs = @()
-if (Get-Command py -ErrorAction SilentlyContinue) {
-    $PythonCommand = "py"
-    $PythonArgs = @("-3")
-} elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    $PythonCommand = "python"
-}
-
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
-    if ($PythonCommand) {
-        & $PythonCommand @PythonArgs -m venv (Join-Path $Root ".venv")
-    } elseif (Get-Command uv -ErrorAction SilentlyContinue) {
-        Write-Host "No system Python found; using uv-managed Python 3.12."
-        & uv venv --python 3.12 (Join-Path $Root ".venv")
-    } else {
-        throw "Python 3.11 or newer, or uv, is required. Install Python or uv and run this script again."
+    $UvCommand = Join-Path $HOME ".local\bin\uv.exe"
+    if (-not (Test-Path $UvCommand)) {
+        $uv = Get-Command uv.exe -ErrorAction SilentlyContinue
+        if ($uv) { $UvCommand = $uv.Source }
     }
+    if (Test-Path $UvCommand) {
+        Write-Host "No system Python found; using uv-managed Python 3.12."
+        & $UvCommand venv --python 3.12 (Join-Path $Root ".venv")
+    } else {
+        $PythonCommand = $null
+        $PythonArgs = @()
+        if (Get-Command py.exe -ErrorAction SilentlyContinue) {
+            $PythonCommand = "py.exe"
+            $PythonArgs = @("-3")
+        } elseif (Get-Command python.exe -ErrorAction SilentlyContinue) {
+            $PythonCommand = "python.exe"
+        }
+        if ($PythonCommand) {
+            & $PythonCommand @PythonArgs -m venv (Join-Path $Root ".venv")
+        } else {
+            throw "Python 3.11 or newer, or uv, is required. Install Python or uv and run this script again."
+        }
+    }
+}
+if (-not (Test-Path $VenvPython)) {
+    throw "The Python virtual environment could not be created. Install Python 3.11+ or uv, then run this script again."
 }
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -e $Root
