@@ -46,6 +46,15 @@ def _fullscreen_setup(project: Path, found):
 
     def editor(stdscr):
         stdscr.keypad(True)
+        def put(y, x, value, attr=0):
+            """Draw clipped text without letting a narrow terminal abort setup."""
+            h, w = stdscr.getmaxyx()
+            if y < 0 or y >= h or x >= w:
+                return
+            try:
+                stdscr.addnstr(y, max(0, x), str(value), max(1, w - max(0, x) - 1), attr)
+            except curses.error:
+                pass
         if curses.has_colors():
             curses.start_color(); curses.use_default_colors()
         translations = {
@@ -106,37 +115,37 @@ def _fullscreen_setup(project: Path, found):
                 base_attr, active_attr = 0, curses.A_REVERSE | curses.A_BOLD
             stdscr.erase(); h, w = stdscr.getmaxyx()
             title = text["title"]
-            stdscr.addstr(1, 2, title[:w-4], curses.A_BOLD)
+            put(1, 2, title, curses.A_BOLD)
             tabs = [text["tabs"][0], text["tabs"][1], appearance_names.get(language, "Appearance"), text["control"], text["tabs"][-1]]
             x = 2
             for i, tab in enumerate(tabs):
                 attr = active_attr if i == page else curses.A_BOLD
-                stdscr.addstr(2, x, f" {tab} ", attr); x += len(tab) + 4
-            stdscr.addstr(3, 2, ("─" * max(1, w - 4))[:w-4])
+                put(2, x, f" {tab} ", attr); x += len(tab) + 4
+            put(3, 2, "─" * max(1, w - 4))
             if page == 0:
-                stdscr.addstr(5, 4, text["provider"], curses.A_BOLD)
+                put(5, 4, text["provider"], curses.A_BOLD)
                 for i, name in enumerate(providers):
                     mark = "●" if name in enabled else "○"
-                    stdscr.addstr(7+i, 6, f"{mark}  {name:<10} {dict(found).get(name, 'not found')}", active_attr if i == cursor else 0)
+                    put(7+i, 6, f"{mark}  {name:<10} {dict(found).get(name, 'not found')}", active_attr if i == cursor else 0)
                 stdscr.addnstr(11+len(providers), 4, text["provider_note"], max(1, w-8), curses.A_DIM)
             elif page == 1:
-                stdscr.addstr(5, 4, text["workers_title"], curses.A_BOLD)
+                put(5, 4, text["workers_title"], curses.A_BOLD)
                 for i, worker in enumerate(workers):
                     line = f"{worker['id']:<18} {worker['provider']:<8} {text['role_label']}={worker['role']:<18} {text['scope_label']}={worker['scope']}"
                     stdscr.addstr(7+i, 4, line[:w-8], active_attr if i == cursor else 0)
-                stdscr.addstr(9+len(workers), 4, text["workers_note"], curses.A_DIM)
+                put(9+len(workers), 4, text["workers_note"], curses.A_DIM)
             elif page == 2:
-                stdscr.addstr(5, 4, text["language"] + " / " + text["theme"], curses.A_BOLD)
-                stdscr.addstr(7, 6, text["language_prompt"])
+                put(5, 4, text["language"] + " / " + text["theme"], curses.A_BOLD)
+                put(7, 6, text["language_prompt"])
                 for i, (code, name) in enumerate(languages):
                     attr = active_attr if i == cursor else 0
-                    stdscr.addstr(9+i, 8, ("●" if language == code else "○") + "  " + name, attr)
-                stdscr.addstr(18, 6, text["theme_prompt"])
+                    put(9+i, 8, ("●" if language == code else "○") + "  " + name, attr)
+                put(18, 6, text["theme_prompt"])
                 for i, (code, label) in enumerate((("dark", text["dark"]), ("light", text["light"]))):
-                    stdscr.addstr(19+i, 8, ("●" if theme == code else "○") + "  " + label, active_attr if cursor == len(languages)+i else 0)
-                stdscr.addstr(21, 6, text["choose"], curses.A_DIM)
+                    put(19+i, 8, ("●" if theme == code else "○") + "  " + label, active_attr if cursor == len(languages)+i else 0)
+                put(21, 6, text["choose"], curses.A_DIM)
             elif page == 3:
-                stdscr.addstr(5, 4, text["control"], curses.A_BOLD)
+                put(5, 4, text["control"], curses.A_BOLD)
                 stdscr.addnstr(7, 6, text["control_prompt"], max(1, w-10))
                 options = [("lock", text["lock"]), ("flexible", text["flexible"])]
                 for i, (code, label) in enumerate(options):
@@ -274,7 +283,8 @@ def show_config(project: str | Path) -> None:
 
 def show_mcp_config(project: str | Path, output: str = "codex") -> None:
     root = Path(project).resolve()
-    python = str(root / ".venv/bin/python")
+    venv = root / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+    python = str(venv if venv.exists() else sys.executable)
     state = str(root / ".agent-control-plane/state.sqlite3")
     if output == "json":
         print(json.dumps({"mcpServers": {"agent-control-plane": {"command": python, "args": ["-m", "agent_control_plane", "mcp", "--state", state]}}}, indent=2))
@@ -289,7 +299,7 @@ def connect_codex(project: str | Path, force: bool = False) -> Path:
     root = Path(project).resolve(); target = root / ".codex" / "config.toml"
     if target.exists() and not force: raise FileExistsError(f"{target} already exists; use --force after reviewing it")
     target.parent.mkdir(parents=True, exist_ok=True)
-    candidate = root / ".venv/bin/python"
+    candidate = root / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
     python = candidate if candidate.exists() else Path(sys.executable)
     target.write_text(f'''# Generated by acp connect codex; review before committing.\n[mcp_servers.agent_control_plane]\ncommand = "{python}"\ncwd = "{root}"\nenv = {{ PYTHONPATH = "{root / 'src'}" }}\nargs = ["-m", "agent_control_plane", "mcp", "--state", "{root / '.agent-control-plane/state.sqlite3'}"]\n''')
     print(f"✓ Codex project config written: {target}\n  Restart Codex in this project to discover ACP tools.")

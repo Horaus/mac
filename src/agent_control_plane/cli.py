@@ -15,6 +15,11 @@ from .service import run_worker, validate
 from .store import Store
 from .setup import connect_codex, doctor, run_setup, show_config, show_mcp_config
 
+def _venv_python(root: Path) -> Path:
+    """Return the project's virtualenv interpreter on POSIX or Windows."""
+    candidates = [root / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python"), Path(sys.executable)]
+    return next((path for path in candidates if path.exists()), candidates[-1])
+
 def _menu(project="."):
     try:
         import curses
@@ -107,7 +112,7 @@ def _menu(project="."):
             elif key in (curses.KEY_DOWN, ord("j")): offset = min(max(0, len(wrapped)-visible), offset + 1)
     def guide():
         lang = profile.get("language", "en")
-        root = Path(project).resolve(); python = root / ".venv/bin/python"; state = root / ".agent-control-plane/state.sqlite3"
+        root = Path(project).resolve(); python = _venv_python(root); state = root / ".agent-control-plane/state.sqlite3"
         commands = {
             "codex": f"codex mcp add mac --env PYTHONPATH={root / 'src'} -- {python} -m agent_control_plane mcp --state {state}",
             "claude": f"claude mcp add --scope user mac --env PYTHONPATH={root / 'src'} -- {python} -m agent_control_plane mcp --state {state}",
@@ -152,7 +157,7 @@ def _menu(project="."):
         if not lines: lines = ["Chưa có hoạt động nào. MAC đã sẵn sàng nhận task."]
         panel("TRẠNG THÁI", lines or ["Chưa có dữ liệu task."])
     elif choice == "guide":
-        root = Path(project).resolve(); python = root / ".venv/bin/python"; state = root / ".agent-control-plane/state.sqlite3"
+        root = Path(project).resolve(); python = _venv_python(root); state = root / ".agent-control-plane/state.sqlite3"
         guide()
     elif choice == "doctor":
         output = io.StringIO()
@@ -163,7 +168,7 @@ def _menu(project="."):
         try:
             pull = subprocess.run(["git", "fetch", "origin", "main"], cwd=root, capture_output=True, text=True, check=True)
             subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=root, capture_output=True, text=True, check=True)
-            pip = subprocess.run([str(root / ".venv/bin/python"), "-m", "pip", "install", "-e", "."], cwd=root, capture_output=True, text=True, check=True)
+            pip = subprocess.run([str(_venv_python(root)), "-m", "pip", "install", "-e", "."], cwd=root, capture_output=True, text=True, check=True)
             panel("CẬP NHẬT MAC", ["✓ Đã tải phiên bản mới.", "✓ Đã cài lại package.", "✓ Cấu hình và dữ liệu được giữ nguyên.", "", pull.stdout.strip()[-500:]])
             os.execve(str(root / "mac"), [str(root / "mac")], os.environ.copy())
         except subprocess.CalledProcessError as error:
