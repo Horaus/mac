@@ -229,7 +229,7 @@ def _fullscreen_setup(project: Path, found):
                 if answer in (ord('n'), ord('N')): return False
     try:
         return curses.wrapper(editor)
-    except (curses.error, OSError, UnicodeError, KeyError, TypeError, ValueError):
+    except Exception:
         # Never strand the user outside setup because of an old or malformed
         # profile; run_setup will continue with the line-based editor.
         return None
