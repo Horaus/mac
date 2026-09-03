@@ -172,7 +172,7 @@ def _fullscreen_setup(project: Path, found):
             if page == 0:
                 put(5, 4, text["provider"], curses.A_BOLD)
                 for i, name in enumerate(providers):
-                    mark = "●" if name in enabled else "○"
+                    mark = "[ON]" if name in enabled else "[OFF]"
                     put(7+i, 6, f"{mark}  {name:<10} {dict(found).get(name, 'not found')}", active_attr if i == cursor else 0)
                 if not providers:
                     put(7, 6, "No Codex or Gemini CLI is installed. Open Master Help to install one.", curses.A_DIM)
