@@ -101,6 +101,15 @@ Phần cấu hình bên dưới dành cho AI agent đọc; người dùng không
     ./scripts/bootstrap.sh .
 
 Hoặc cập nhập trực tiếp trong menu MAC khi gọi lệnh "mac" trên Terminal
+
+#### 4. Gỡ cài đặt
+
+Chọn **Gỡ cài đặt MAC** trong menu, hoặc chạy:
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1 -Yes
+    ./scripts/uninstall.sh --yes
+
+Lệnh xóa môi trường Python, dữ liệu MAC và launcher nhưng giữ mã nguồn.
 ### Dành cho AI agent
 
 Đây là hướng dẫn để AI agent tự thiết lập kết nối, không phải các bước người
@@ -247,6 +256,15 @@ agent to read; users do not paste those MCP commands into chat.
 
 You can also update directly from the MAC menu after running <code>mac</code>
 in Terminal.
+
+#### 4. Uninstall
+
+Choose **Uninstall MAC** in the menu, or run:
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1 -Yes
+    ./scripts/uninstall.sh --yes
+
+This removes the Python environment, MAC state and launchers while keeping the source checkout.
 
 ### For AI agents
 

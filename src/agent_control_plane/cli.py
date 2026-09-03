@@ -62,9 +62,11 @@ def _menu(project="."):
     except (OSError, json.JSONDecodeError): profile = {}
     labels = menu_text.get(profile.get("language", "en"), menu_text["en"])
     theme = profile.get("theme", "dark")
-    guide_names = {"en":"Connect a Master / Help","vi":"Kết nối Master / Hướng dẫn","zh":"连接 Master / 帮助","ja":"Master 接続 / ヘルプ","ko":"Master 연결 / 도움말","fr":"Connecter un Master / Aide","es":"Conectar Master / Ayuda","de":"Master verbinden / Hilfe"}
+    guide_names = {"en":"Install CLI / Master Help","vi":"Cài CLI / Hướng dẫn Master","zh":"安装 CLI / Master 帮助","ja":"CLI インストール / ヘルプ","ko":"CLI 설치 / Master 도움말","fr":"Installer un CLI / Aide","es":"Instalar CLI / Ayuda","de":"CLI installieren / Master-Hilfe"}
     guide_label = guide_names.get(profile.get("language", "en"), guide_names["en"])
-    items = [(labels[0], "setup"), (labels[1], "status"), (guide_label, "guide"), (labels[2], "update"), (labels[3], "doctor"), (labels[4], "quit")]
+    uninstall_names = {"en": "Uninstall MAC", "vi": "Gỡ cài đặt MAC", "zh": "卸载 MAC", "ja": "MAC をアンインストール", "ko": "MAC 제거", "fr": "Désinstaller MAC", "es": "Desinstalar MAC", "de": "MAC deinstallieren"}
+    uninstall_label = uninstall_names.get(profile.get("language", "en"), uninstall_names["en"])
+    items = [(labels[0], "setup"), (labels[1], "status"), (guide_label, "guide"), (labels[2], "update"), (labels[3], "doctor"), (uninstall_label, "uninstall"), (labels[4], "quit")]
     def apply_theme(win):
         if curses.has_colors():
             curses.start_color(); curses.use_default_colors()
@@ -173,6 +175,15 @@ def _menu(project="."):
             os.execve(str(root / "mac"), [str(root / "mac")], os.environ.copy())
         except subprocess.CalledProcessError as error:
             panel("CẬP NHẬT MAC", ["! Cập nhật chưa hoàn tất.", error.stderr or str(error)])
+    elif choice == "uninstall":
+        root = Path(project).resolve()
+        script = root / "scripts" / ("uninstall.ps1" if os.name == "nt" else "uninstall.sh")
+        try:
+            command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Yes"] if os.name == "nt" else ["bash", str(script), "--yes"]
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True, check=True)
+            panel("GỠ CÀI ĐẶT MAC", result.stdout.splitlines() or ["MAC đã được gỡ cài đặt."])
+        except subprocess.CalledProcessError as error:
+            panel("GỠ CÀI ĐẶT MAC", ["! Gỡ cài đặt chưa hoàn tất.", error.stderr or str(error)])
     return _menu(project)
 
 

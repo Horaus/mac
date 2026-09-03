@@ -103,19 +103,20 @@ def _fullscreen_setup(project: Path, found):
             "de": ("Worker-Name", "CLI-Provider", "Rolle", "Bereich / Ort", "Worker-Anzahl"),
         }
         appearance_names = {"en":"Appearance","vi":"Hiển thị","zh":"外观","ja":"外観","ko":"화면","fr":"Apparence","es":"Apariencia","de":"Anzeige"}
-        providers = [name for name, _ in found] or ["codex", "gemini"]
+        providers = [name for name, _ in found]
+        default_provider = providers[0] if providers else ""
         old_config = project / ".agent-control-plane" / "config.json"
         try: saved = json.loads(old_config.read_text()) if old_config.exists() else {}
         except (OSError, json.JSONDecodeError): saved = {}
-        enabled = set(saved.get("providers", providers[:1])) & set(providers) or set(providers[:1])
-        workers = saved.get("workers") or [{"id": "worker-1", "provider": providers[0], "role": "general", "scope": "project"}]
+        enabled = set(saved.get("providers", providers[:1])) & set(providers)
+        workers = saved.get("workers") or [{"id": "worker-1", "provider": default_provider, "role": "general", "scope": "project"}]
         # Configurations created by older releases only stored id/provider.
         # Normalize them before rendering so changing tabs cannot crash TUI.
         normalized = []
         for index, worker in enumerate(workers, 1):
             item = dict(worker) if isinstance(worker, dict) else {}
             item.setdefault("id", f"worker-{index}")
-            item.setdefault("provider", providers[0])
+            item.setdefault("provider", default_provider)
             item.setdefault("role", "general")
             item.setdefault("scope", "project")
             normalized.append(item)
@@ -155,6 +156,8 @@ def _fullscreen_setup(project: Path, found):
                 for i, name in enumerate(providers):
                     mark = "●" if name in enabled else "○"
                     put(7+i, 6, f"{mark}  {name:<10} {dict(found).get(name, 'not found')}", active_attr if i == cursor else 0)
+                if not providers:
+                    put(7, 6, "No Codex or Gemini CLI is installed. Open Master Help to install one.", curses.A_DIM)
                 put(11+len(providers), 4, text["provider_note"], curses.A_DIM)
             elif page == 1:
                 put(5, 4, text["workers_title"], curses.A_BOLD)
@@ -216,7 +219,7 @@ def _fullscreen_setup(project: Path, found):
             elif page == 1 and key == ord('a'):
                 labels = fields.get(language, fields["en"])
                 name = ask(stdscr, labels[0], f"worker-{len(workers)+1}")
-                provider = ask(stdscr, labels[1], next(iter(enabled), providers[0]))
+                provider = ask(stdscr, labels[1], next(iter(enabled), default_provider))
                 role = ask(stdscr, labels[2], "general"); scope = ask(stdscr, labels[3], "project")
                 workers.append({"id": name, "provider": provider, "role": role, "scope": scope}); cursor = len(workers)-1
             elif page == 1 and key == ord('n'):
@@ -224,7 +227,7 @@ def _fullscreen_setup(project: Path, found):
                 try: wanted = max(1, min(24, int(count)))
                 except ValueError: wanted = len(workers)
                 while len(workers) < wanted:
-                    i = len(workers) + 1; workers.append({"id": f"worker-{i}", "provider": next(iter(enabled), providers[0]), "role": "general", "scope": "project"})
+                    i = len(workers) + 1; workers.append({"id": f"worker-{i}", "provider": next(iter(enabled), default_provider), "role": "general", "scope": "project"})
                 while len(workers) > wanted and len(workers) > 1: workers.pop()
                 cursor = min(cursor, len(workers)-1)
             elif page == 1 and workers and key == ord('e'):
@@ -275,7 +278,7 @@ def run_setup(project: str | Path) -> Path:
         print("    Cài một CLI rồi chạy lại `acp setup`.")
     else:
         for i, (name, path) in enumerate(found, 1): print(f"  {_GREEN}{i}.{_RESET} {name:<8} {_DIM}{path}{_RESET}")
-    provider = "codex"
+    provider = found[0][0] if found else ""
     if found:
         choice = _ask(f"Chọn CLI [1-{len(found)}]", "1")
         try: provider = found[max(0, min(len(found)-1, int(choice)-1))][0]
