@@ -131,7 +131,9 @@ def _fullscreen_setup(project: Path, found):
         page, cursor, message = 0, 0, ""
         curses.curs_set(0)
         while True:
-            text = translations.get(language, translations["en"])
+            # Merge with English so partially translated/legacy profiles can
+            # never crash when a newly added label is rendered.
+            text = {**translations["en"], **translations.get(language, {})}
             if curses.has_colors():
                 base_fg, base_bg = (curses.COLOR_WHITE, curses.COLOR_BLACK) if theme == "dark" else (curses.COLOR_BLACK, curses.COLOR_WHITE)
                 curses.init_pair(1, base_fg, base_bg); curses.init_pair(2, base_bg, base_fg)
