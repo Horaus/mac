@@ -111,6 +111,8 @@ def _fullscreen_setup(project: Path, found):
         language = saved.get("language", "en")
         theme = saved.get("theme", "dark")
         control = saved.get("control", {"policy": "lock"})
+        if not isinstance(control, dict):
+            control = {"policy": "lock"}
         if control.get("policy") not in {"lock", "flexible"}: control["policy"] = "lock"
         confirm = False
         page, cursor, message = 0, 0, ""
