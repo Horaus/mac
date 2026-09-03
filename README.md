@@ -140,9 +140,11 @@ Codex app và extension dùng cùng cấu hình MCP. Nếu tool chưa xuất hi�
 Khởi động lại Claude Code, kiểm tra bằng <code>/mcp</code>, rồi gọi
 <code>control_status</code>.
 
-#### Gemini CLI
+#### Gemini CLI và Antigravity
 
-Thêm server <code>mac</code> vào <code>~/.gemini/settings.json</code>, thay
+Gemini CLI dùng <code>~/.gemini/settings.json</code>. Antigravity dùng
+<code>~/.gemini/config/mcp_config.json</code> (không dùng settings.json). Thêm
+server <code>mac</code>, thay
 <code>/ABSOLUTE/PATH/mac</code> bằng đường dẫn tuyệt đối của project:
 
     {
@@ -155,7 +157,7 @@ Thêm server <code>mac</code> vào <code>~/.gemini/settings.json</code>, thay
       }
     }
 
-Khởi động lại Gemini, xác nhận MAC tools xuất hiện, rồi gọi
+Khởi động lại Gemini hoặc Antigravity, xác nhận MAC tools xuất hiện, rồi gọi
 <code>control_status</code>.
 
 ## English
