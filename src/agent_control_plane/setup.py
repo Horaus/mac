@@ -23,7 +23,19 @@ def _ask(prompt: str, default: str = "") -> str:
 
 
 def _scan_providers():
-    return [(name, shutil.which(name)) for name in ("codex", "gemini") if shutil.which(name)]
+    home = Path.home()
+    markers = {
+        "codex": (home / ".codex" / "auth.json",),
+        "gemini": (home / ".gemini" / "oauth_creds.json", home / ".gemini" / "google_accounts.json"),
+    }
+    # An executable alone is not a usable provider: require a local login
+    # marker (or an API key) before offering it for worker dispatch.
+    ready = []
+    for name in ("codex", "gemini"):
+        path = shutil.which(name)
+        if path and (any(marker.is_file() for marker in markers[name]) or os.environ.get(f"{name.upper()}_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+            ready.append((name, path))
+    return ready
 
 
 def _fullscreen_setup(project: Path, found):
