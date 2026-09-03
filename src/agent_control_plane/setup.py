@@ -180,6 +180,8 @@ def _fullscreen_setup(project: Path, found):
                     line = f"{worker['id']:<18} {worker['provider']:<8} {text['role_label']}={worker['role']:<18} {text['scope_label']}={worker['scope']}"
                     put(7+i, 4, line, active_attr if i == cursor else 0)
                 put(9+len(workers), 4, text["workers_note"], curses.A_DIM)
+                if message:
+                    put(11+len(workers), 4, message, curses.A_BOLD)
             elif page == 2:
                 put(5, 4, text["language"] + " / " + text["theme"], curses.A_BOLD)
                 put(7, 6, text["language_prompt"])
@@ -232,12 +234,18 @@ def _fullscreen_setup(project: Path, found):
             elif key in (curses.KEY_UP, ord('k')): cursor -= 1; cursor %= max(1, len(providers) if page == 0 else len(languages)+2 if page == 2 else 2 if page == 3 else len(workers))
             elif page == 0 and key == ord(' '): enabled.symmetric_difference_update({providers[cursor]})
             elif page == 1 and key == ord('a'):
+                if not providers or not enabled:
+                    message = "Cài và bật ít nhất một CLI trước khi thêm worker." if language == "vi" else "Install and enable at least one CLI before adding workers."
+                    continue
                 labels = fields.get(language, fields["en"])
                 name = ask(stdscr, labels[0], f"worker-{len(workers)+1}")
                 provider = ask(stdscr, labels[1], next(iter(enabled), default_provider))
                 role = ask(stdscr, labels[2], "general"); scope = ask(stdscr, labels[3], "project")
                 workers.append({"id": name, "provider": provider, "role": role, "scope": scope}); cursor = len(workers)-1
             elif page == 1 and key == ord('n'):
+                if not providers or not enabled:
+                    message = "Cài và bật ít nhất một CLI trước khi đổi số worker." if language == "vi" else "Install and enable at least one CLI before changing worker count."
+                    continue
                 count = ask(stdscr, fields.get(language, fields["en"])[4], str(len(workers)))
                 try: wanted = max(1, min(24, int(count)))
                 except ValueError: wanted = len(workers)
@@ -246,9 +254,15 @@ def _fullscreen_setup(project: Path, found):
                 while len(workers) > wanted and len(workers) > 1: workers.pop()
                 cursor = min(cursor, len(workers)-1)
             elif page == 1 and workers and key == ord('e'):
+                if not providers or not enabled:
+                    message = "Bật ít nhất một CLI trước khi sửa worker." if language == "vi" else "Enable at least one CLI before editing workers."
+                    continue
                 labels = fields.get(language, fields["en"]); x = workers[cursor]
                 x["id"] = ask(stdscr, labels[0], x["id"]); x["provider"] = ask(stdscr, labels[1], x["provider"]); x["role"] = ask(stdscr, labels[2], x["role"]); x["scope"] = ask(stdscr, labels[3], x["scope"])
             elif page == 1 and workers and key == ord('p'):
+                if not providers or not enabled:
+                    message = "Bật ít nhất một CLI trước khi đổi provider." if language == "vi" else "Enable at least one CLI before changing a provider."
+                    continue
                 choices = sorted(enabled) or providers; x = workers[cursor]; x["provider"] = choices[(choices.index(x["provider"]) + 1) % len(choices)] if x["provider"] in choices else choices[0]
             elif page == 1 and len(workers) > 1 and key == ord('d'): workers.pop(cursor); cursor %= len(workers)
             elif page == 2 and key in (curses.KEY_ENTER, 10, 13):
