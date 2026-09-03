@@ -96,6 +96,17 @@ def _fullscreen_setup(project: Path, found):
         except (OSError, json.JSONDecodeError): saved = {}
         enabled = set(saved.get("providers", providers[:1])) & set(providers) or set(providers[:1])
         workers = saved.get("workers") or [{"id": "worker-1", "provider": providers[0], "role": "general", "scope": "project"}]
+        # Configurations created by older releases only stored id/provider.
+        # Normalize them before rendering so changing tabs cannot crash TUI.
+        normalized = []
+        for index, worker in enumerate(workers, 1):
+            item = dict(worker) if isinstance(worker, dict) else {}
+            item.setdefault("id", f"worker-{index}")
+            item.setdefault("provider", providers[0])
+            item.setdefault("role", "general")
+            item.setdefault("scope", "project")
+            normalized.append(item)
+        workers = normalized
         languages = [("vi", "Tiếng Việt"), ("en", "English"), ("zh", "中文"), ("ja", "日本語"), ("ko", "한국어"), ("fr", "Français"), ("es", "Español"), ("de", "Deutsch")]
         language = saved.get("language", "en")
         theme = saved.get("theme", "dark")
