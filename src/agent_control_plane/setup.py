@@ -26,14 +26,17 @@ def _scan_providers():
     home = Path.home()
     markers = {
         "codex": (home / ".codex" / "auth.json",),
-        "gemini": (home / ".gemini" / "oauth_creds.json", home / ".gemini" / "google_accounts.json"),
+        # Personal Gemini OAuth is no longer a supported Gemini CLI tier;
+        # only API-key or enterprise/project authentication is eligible.
+        "gemini": (),
     }
     # An executable alone is not a usable provider: require a local login
     # marker (or an API key) before offering it for worker dispatch.
     ready = []
     for name in ("codex", "gemini"):
         path = shutil.which(name)
-        if path and (any(marker.is_file() for marker in markers[name]) or os.environ.get(f"{name.upper()}_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+        enterprise = name == "gemini" and os.environ.get("GOOGLE_CLOUD_PROJECT")
+        if path and (any(marker.is_file() for marker in markers[name]) or os.environ.get(f"{name.upper()}_API_KEY") or os.environ.get("GOOGLE_API_KEY") or enterprise):
             ready.append((name, path))
     return ready
 
