@@ -46,6 +46,19 @@ def _fullscreen_setup(project: Path, found):
 
     def editor(stdscr):
         stdscr.keypad(True)
+        def read_key():
+            key = stdscr.getch()
+            if key != 27:
+                return key
+            stdscr.timeout(80)
+            seq = []
+            for _ in range(2):
+                value = stdscr.getch()
+                if value == -1:
+                    break
+                seq.append(value)
+            stdscr.timeout(-1)
+            return {"[A": curses.KEY_UP, "[B": curses.KEY_DOWN, "[C": curses.KEY_RIGHT, "[D": curses.KEY_LEFT}.get("".join(map(chr, seq)), 27)
         def put(y, x, value, attr=0):
             """Draw clipped text without letting a narrow terminal abort setup."""
             h, w = stdscr.getmaxyx()
@@ -179,7 +192,7 @@ def _fullscreen_setup(project: Path, found):
                 if confirm: put(h-4, 2, text["exit"], curses.A_BOLD | curses.A_STANDOUT)
                 put(h-3, 2, message, curses.A_DIM)
             put(h-1, 2, text["footer"], curses.A_DIM)
-            key = stdscr.getch()
+            key = read_key()
             if key in (ord('q'), 27) and not confirm:
                 page = 4; confirm = True; continue
             if confirm:
