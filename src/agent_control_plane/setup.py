@@ -121,6 +121,8 @@ def _fullscreen_setup(project: Path, found):
         try: saved = json.loads(old_config.read_text()) if old_config.exists() else {}
         except (OSError, json.JSONDecodeError): saved = {}
         enabled = set(saved.get("providers", providers[:1])) & set(providers)
+        if not enabled and providers:
+            enabled = {providers[0]}
         workers = saved.get("workers") or [{"id": "worker-1", "provider": default_provider, "role": "general", "scope": "project"}]
         # Configurations created by older releases only stored id/provider.
         # Normalize them before rendering so changing tabs cannot crash TUI.
@@ -128,7 +130,8 @@ def _fullscreen_setup(project: Path, found):
         for index, worker in enumerate(workers, 1):
             item = dict(worker) if isinstance(worker, dict) else {}
             item.setdefault("id", f"worker-{index}")
-            item.setdefault("provider", default_provider)
+            if item.get("provider") not in providers:
+                item["provider"] = default_provider
             item.setdefault("role", "general")
             item.setdefault("scope", "project")
             normalized.append(item)
