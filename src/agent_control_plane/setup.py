@@ -244,6 +244,9 @@ def _fullscreen_setup(project: Path, found):
                 name = ask(stdscr, labels[0], f"worker-{len(workers)+1}")
                 provider = ask(stdscr, labels[1], next(iter(enabled), default_provider))
                 role = ask(stdscr, labels[2], "general"); scope = ask(stdscr, labels[3], "project")
+                if any(worker.get("id") == name for worker in workers):
+                    message = "Tên worker đã tồn tại; hãy chọn tên khác." if language == "vi" else "Worker name already exists; choose another name."
+                    continue
                 workers.append({"id": name, "provider": provider, "role": role, "scope": scope}); cursor = len(workers)-1
             elif page == 1 and key == ord('n'):
                 if not providers or not enabled:
@@ -261,7 +264,12 @@ def _fullscreen_setup(project: Path, found):
                     message = "Bật ít nhất một CLI trước khi sửa worker." if language == "vi" else "Enable at least one CLI before editing workers."
                     continue
                 labels = fields.get(language, fields["en"]); x = workers[cursor]
-                x["id"] = ask(stdscr, labels[0], x["id"]); x["provider"] = ask(stdscr, labels[1], x["provider"]); x["role"] = ask(stdscr, labels[2], x["role"]); x["scope"] = ask(stdscr, labels[3], x["scope"])
+                old_id = x["id"]
+                new_id = ask(stdscr, labels[0], old_id)
+                if new_id != old_id and any(worker.get("id") == new_id for worker in workers):
+                    message = "Tên worker đã tồn tại; thay đổi đã hủy." if language == "vi" else "Worker name already exists; edit canceled."
+                    continue
+                x["id"] = new_id; x["provider"] = ask(stdscr, labels[1], x["provider"]); x["role"] = ask(stdscr, labels[2], x["role"]); x["scope"] = ask(stdscr, labels[3], x["scope"])
             elif page == 1 and workers and key == ord('p'):
                 if not providers or not enabled:
                     message = "Bật ít nhất một CLI trước khi đổi provider." if language == "vi" else "Enable at least one CLI before changing a provider."
@@ -372,14 +380,15 @@ def connect_codex(project: str | Path, force: bool = False) -> Path:
 
 def doctor(project: str | Path, port: int = 8765) -> int:
     root = Path(project).resolve(); state = root / ".agent-control-plane"
+    ready_providers = {name for name, _ in _scan_providers()}
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.4) as response:
             background = response.status == 200
     except Exception:
         background = False
     checks = [("project", root.exists()), ("state", (state / "state.sqlite3").exists()),
-              ("config", (state / "config.json").exists()), ("codex", shutil.which("codex") is not None),
-              ("gemini", shutil.which("gemini") is not None), ("background-http", background)]
+              ("config", (state / "config.json").exists()), ("codex", "codex" in ready_providers),
+              ("gemini", "gemini" in ready_providers), ("background-http", background)]
     print("\nAgent Control Plane · doctor\n")
     for name, ok in checks: print(f"  [{'✓' if ok else '!'}] {name}")
     if not checks[1][1]: print("\n  Next: acp --project . init")
