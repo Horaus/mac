@@ -148,7 +148,22 @@ class Store:
             policy = json.loads(config_path.read_text()).get("control", {}).get("policy", "lock") if config_path.exists() else "lock"
         used = {r[0] for r in self.db.execute("SELECT worker_id FROM control_allocations")}
         config_path = self.path.parent / "config.json"
-        configured = json.loads(config_path.read_text()).get("workers", []) if config_path.exists() else []
+        config_data = json.loads(config_path.read_text()) if config_path.exists() else {}
+        configured = config_data.get("workers", [])
+        # Flexible may grow the configured pool when the request itself asks
+        # for more workers than currently exist. Lock never mutates capacity.
+        if policy == "flexible" and count > len(configured):
+            providers = config_data.get("providers", [])
+            default_provider = providers[0] if providers else (configured[0].get("provider", "") if configured else "")
+            existing_ids = {w.get("id") for w in configured}
+            for index in range(1, count + 1):
+                worker_id = f"worker-{index}"
+                if worker_id in existing_ids:
+                    continue
+                configured.append({"id": worker_id, "provider": default_provider, "role": "general", "scope": "project"})
+                existing_ids.add(worker_id)
+            config_data["workers"] = configured
+            config_path.write_text(json.dumps(config_data, ensure_ascii=False, indent=2) + "\n")
         available = [w["id"] for w in configured if w.get("id") not in used and (policy != "lock" or not w.get("boss_id") or w.get("boss_id") == boss_id)]
         if len(available) < count:
             if policy == "lock":
