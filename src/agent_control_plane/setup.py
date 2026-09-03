@@ -143,7 +143,7 @@ def _fullscreen_setup(project: Path, found):
                 put(5, 4, text["workers_title"], curses.A_BOLD)
                 for i, worker in enumerate(workers):
                     line = f"{worker['id']:<18} {worker['provider']:<8} {text['role_label']}={worker['role']:<18} {text['scope_label']}={worker['scope']}"
-                    stdscr.addstr(7+i, 4, line[:w-8], active_attr if i == cursor else 0)
+                    put(7+i, 4, line, active_attr if i == cursor else 0)
                 put(9+len(workers), 4, text["workers_note"], curses.A_DIM)
             elif page == 2:
                 put(5, 4, text["language"] + " / " + text["theme"], curses.A_BOLD)
@@ -164,7 +164,7 @@ def _fullscreen_setup(project: Path, found):
                     stdscr.addnstr(9+i, 8, value, max(1, w-12), active_attr if i == cursor else 0)
                 stdscr.addnstr(13, 6, text["control_note"], max(1, w-10), curses.A_DIM)
             else:
-                stdscr.addstr(5, 4, text["finish"], curses.A_BOLD)
+                put(5, 4, text["finish"], curses.A_BOLD)
                 for row, value in enumerate((
                     text["providers"] + ": " + ", ".join(sorted(enabled)),
                     text["workers"] + ":   " + str(len(workers)),
