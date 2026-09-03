@@ -172,7 +172,11 @@ def _menu(project="."):
             subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=root, capture_output=True, text=True, check=True)
             pip = subprocess.run([str(_venv_python(root)), "-m", "pip", "install", "-e", "."], cwd=root, capture_output=True, text=True, check=True)
             panel("CẬP NHẬT MAC", ["✓ Đã tải phiên bản mới.", "✓ Đã cài lại package.", "✓ Cấu hình và dữ liệu được giữ nguyên.", "", pull.stdout.strip()[-500:]])
-            os.execve(str(root / "mac"), [str(root / "mac")], os.environ.copy())
+            if os.name != "nt":
+                os.execve(str(root / "mac"), [str(root / "mac")], os.environ.copy())
+            # Windows cannot exec the POSIX `mac` shell wrapper. Continue in
+            # the current interpreter after reinstalling the package.
+            return _menu(project)
         except subprocess.CalledProcessError as error:
             panel("CẬP NHẬT MAC", ["! Cập nhật chưa hoàn tất.", error.stderr or str(error)])
     elif choice == "uninstall":
