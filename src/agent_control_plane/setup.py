@@ -140,7 +140,7 @@ def _fullscreen_setup(project: Path, found):
                 for i, name in enumerate(providers):
                     mark = "●" if name in enabled else "○"
                     put(7+i, 6, f"{mark}  {name:<10} {dict(found).get(name, 'not found')}", active_attr if i == cursor else 0)
-                stdscr.addnstr(11+len(providers), 4, text["provider_note"], max(1, w-8), curses.A_DIM)
+                put(11+len(providers), 4, text["provider_note"], curses.A_DIM)
             elif page == 1:
                 put(5, 4, text["workers_title"], curses.A_BOLD)
                 for i, worker in enumerate(workers):
@@ -159,12 +159,12 @@ def _fullscreen_setup(project: Path, found):
                 put(21, 6, text["choose"], curses.A_DIM)
             elif page == 3:
                 put(5, 4, text["control"], curses.A_BOLD)
-                stdscr.addnstr(7, 6, text["control_prompt"], max(1, w-10))
+                put(7, 6, text["control_prompt"])
                 options = [("lock", text["lock"]), ("flexible", text["flexible"])]
                 for i, (code, label) in enumerate(options):
                     value = ("●" if control.get("policy") == code else "○") + "  " + label
-                    stdscr.addnstr(9+i, 8, value, max(1, w-12), active_attr if i == cursor else 0)
-                stdscr.addnstr(13, 6, text["control_note"], max(1, w-10), curses.A_DIM)
+                    put(9+i, 8, value, active_attr if i == cursor else 0)
+                put(13, 6, text["control_note"], curses.A_DIM)
             else:
                 put(5, 4, text["finish"], curses.A_BOLD)
                 for row, value in enumerate((
@@ -174,11 +174,11 @@ def _fullscreen_setup(project: Path, found):
                     text["theme"] + ": " + text[theme],
                     text["policy"] + ": " + control.get("policy", "lock"),
                 ), 7):
-                    stdscr.addnstr(row, 6, value, max(1, w-10))
-                for i, x in enumerate(workers): stdscr.addnstr(13+i, 6, f"{x['id']} → {x['provider']} / {x['role']} / {x['scope']}", max(1, w-10))
-                if confirm: stdscr.addnstr(h-4, 2, text["exit"], max(1, w-4), curses.A_BOLD | curses.A_STANDOUT)
-                stdscr.addnstr(h-3, 2, message, max(1, w-4), curses.A_DIM)
-            stdscr.addnstr(h-1, 2, text["footer"], max(1, w-4), curses.A_DIM)
+                    put(row, 6, value)
+                for i, x in enumerate(workers): put(13+i, 6, f"{x['id']} → {x['provider']} / {x['role']} / {x['scope']}")
+                if confirm: put(h-4, 2, text["exit"], curses.A_BOLD | curses.A_STANDOUT)
+                put(h-3, 2, message, curses.A_DIM)
+            put(h-1, 2, text["footer"], curses.A_DIM)
             key = stdscr.getch()
             if key in (ord('q'), 27) and not confirm:
                 page = 4; confirm = True; continue
