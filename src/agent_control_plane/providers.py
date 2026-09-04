@@ -9,6 +9,17 @@ from pathlib import Path
 from typing import Sequence
 
 
+def _provider_env() -> dict[str, str]:
+    """Provide a deterministic non-MCP stdin and system command PATH."""
+    env = os.environ.copy()
+    path = env.get("PATH", "").split(os.pathsep)
+    for directory in ("/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"):
+        if directory not in path and os.path.isdir(directory):
+            path.append(directory)
+    env["PATH"] = os.pathsep.join(path)
+    return env
+
+
 @dataclass(frozen=True)
 class WorkerResult:
     exit_code: int
@@ -28,7 +39,7 @@ class ProviderAdapter:
     def start(self, prompt: str, cwd: Path) -> "ManagedRun":
         return ManagedRun(subprocess.Popen(self.command(prompt), cwd=cwd, text=True,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           start_new_session=True), self)
+                                           stdin=subprocess.DEVNULL, env=_provider_env(), start_new_session=True), self)
 
     def resume(self, session_id: str, prompt: str, cwd: Path) -> "ManagedRun":
         raise NotImplementedError(f"{self.name} does not support session resume")
@@ -103,7 +114,7 @@ class CodexAdapter(ProviderAdapter):
         # the resume invocation limited to stable, supported flags.
         command = [self.executable, "exec", "resume", "--json", "--skip-git-repo-check", session_id, prompt]
         return ManagedRun(subprocess.Popen(command, cwd=cwd, text=True, stdout=subprocess.PIPE,
-                                           stderr=subprocess.STDOUT, start_new_session=True), self)
+                                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=_provider_env(), start_new_session=True), self)
 
 
 class CommandAdapter(ProviderAdapter):
@@ -148,7 +159,7 @@ def _timeout_output(error: subprocess.TimeoutExpired) -> str:
 
 def _run_provider_command(command: list[str], cwd: Path, timeout: float | None) -> tuple[int, str]:
     process = subprocess.Popen(command, cwd=cwd, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=True)
+                               stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=_provider_env(), start_new_session=True)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
         return (process.returncode if process.returncode is not None else 0, stdout + stderr)
