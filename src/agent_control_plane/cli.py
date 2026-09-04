@@ -14,6 +14,22 @@ from .providers import provider
 from .service import run_worker, validate
 from .store import Store
 from .setup import connect_codex, doctor, run_setup, show_config, show_mcp_config
+from . import __version__
+
+def _release_info(root: Path) -> tuple[str, str]:
+    try:
+        commit = subprocess.run(["git", "log", "-1", "--format=%h"], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+        when = subprocess.run(["git", "log", "-1", "--format=%ad", "--date=iso"], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+        return f"{__version__} ({commit})", when
+    except (OSError, subprocess.CalledProcessError):
+        return __version__, "unknown"
+
+def _update_project(root: Path) -> list[str]:
+    subprocess.run(["git", "fetch", "origin", "main"], cwd=root, capture_output=True, text=True, check=True)
+    subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=root, capture_output=True, text=True, check=True)
+    subprocess.run([str(_venv_python(root)), "-m", "pip", "install", "-e", "."], cwd=root, capture_output=True, text=True, check=True)
+    version, when = _release_info(root)
+    return [f"✓ Updated to version {version}.", f"✓ Update time: {when}.", "✓ Configuration and data were preserved."]
 
 def _venv_python(root: Path) -> Path:
     """Return the project's virtualenv interpreter on POSIX or Windows."""
@@ -168,10 +184,7 @@ def _menu(project="."):
     elif choice == "update":
         root = Path(project).resolve()
         try:
-            pull = subprocess.run(["git", "fetch", "origin", "main"], cwd=root, capture_output=True, text=True, check=True)
-            subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=root, capture_output=True, text=True, check=True)
-            pip = subprocess.run([str(_venv_python(root)), "-m", "pip", "install", "-e", "."], cwd=root, capture_output=True, text=True, check=True)
-            panel("CẬP NHẬT MAC", ["✓ Đã tải phiên bản mới.", "✓ Đã cài lại package.", "✓ Cấu hình và dữ liệu được giữ nguyên.", "", pull.stdout.strip()[-500:]])
+            panel("CẬP NHẬT MAC", _update_project(root))
             if os.name != "nt":
                 os.execve(str(root / "mac"), [str(root / "mac")], os.environ.copy())
             # Windows cannot exec the POSIX `mac` shell wrapper. Continue in
@@ -209,6 +222,7 @@ def main(argv=None) -> int:
     connect = sub.add_parser("connect").add_subparsers(dest="connect_command", required=True)
     connect_codex_parser = connect.add_parser("codex"); connect_codex_parser.add_argument("--force", action="store_true")
     status = sub.add_parser("status")
+    sub.add_parser("update", help="update MAC and show version/time")
     tasks = sub.add_parser("task").add_subparsers(dest="task_command", required=True)
     create = tasks.add_parser("create")
     create.add_argument("--id", required=True); create.add_argument("--title", required=True)
@@ -262,6 +276,12 @@ def main(argv=None) -> int:
             connect_codex(args.project, args.force)
         elif args.command == "status":
             print(json.dumps(store.snapshot(), indent=2, default=str))
+        elif args.command == "update":
+            try:
+                print("\n".join(_update_project(Path(args.project).resolve())))
+            except subprocess.CalledProcessError as error:
+                print(f"Update failed: {error.stderr or error}", file=sys.stderr)
+                return 1
         elif args.command == "task" and args.task_command == "create":
             store.add_task(args.id, args.title, args.provider, args.depends_on); print(args.id)
         elif args.command == "task" and args.task_command == "retry":
