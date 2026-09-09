@@ -9,9 +9,11 @@ from .store import Store
 from .providers import provider
 from .service import (arbitrate_conflict, cancel_managed_worker, finish_managed_worker,
                        pause_managed_worker, resume_live_worker, run_worker,
-                       start_managed_worker, validate)
+                       start_managed_worker, validate, authorize_action, authorize_runtime_action, report_blocker,
+                       submit_provider, publish_external, delete_destructive)
 from .orchestrator import Supervisor
 from .profiles import resolve_profile
+from .authority import ApprovalToken, AuthorityPolicy, ContextPacket, ExecutionMode, digest
 
 
 TOOL_DEFS = {
@@ -33,6 +35,10 @@ TOOL_DEFS = {
     "renew_resource": {"resource": {"type": "string"}, "task_id": {"type": "string"}, "worker_id": {"type": "string"}, "ttl": {"type": "number"}},
     "bump_resource": {"resource": {"type": "string"}},
     "accept_integration": {"task_id": {"type": "string"}, "worktree": {"type": "string"}, "commit_message": {"type": "string"}, "validation": {"type": "array", "items": {"type": "string"}}},
+    "push_integration": {"remote": {"type": "string"}, "branch": {"type": "string"}, "token_id": {"type": "string"}, "project_id": {"type": "string"}, "provider_id": {"type": "string"}, "job_id": {"type": "string"}, "idempotency_key": {"type": "string"}, "run_id": {"type": "string"}, "task_id": {"type": "string"}, "execution": {"type": "object"}},
+    "provider_submit": {"provider": {"type": "string"}, "job_id": {"type": "string"}, "payload": {"type": "object"}, "paid": {"type": "boolean"}, "approval": {"type": "object"}, "execution": {"type": "object"}},
+    "external_publish": {"payload": {"type": "object"}, "approval": {"type": "object"}, "execution": {"type": "object"}},
+    "destructive_delete": {"target": {"type": "string"}, "approval": {"type": "object"}, "execution": {"type": "object"}},
     "arbitrate_conflict": {"task_id": {"type": "string"}, "decision_id": {"type": "string"}, "provider": {"type": "string"}, "evidence": {"type": "string"}, "cwd": {"type": "string"}},
     "create_task": {"id": {"type": "string"}, "title": {"type": "string"}, "provider": {"type": "string"}, "depends_on": {"type": "array", "items": {"type": "string"}}, "execution": {"type": "object"}},
     "create_resource": {"name": {"type": "string"}, "kind": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}},
@@ -47,11 +53,27 @@ TOOL_DEFS = {
     "wait_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "cancel_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "reason": {"type": "string"}},
     "validate": {"task_id": {"type": "string"}, "command": {"type": "string"}, "cwd": {"type": "string"}, "timeout": {"type": "number"}},
+    "create_approval": {"token_id": {"type": "string"}, "capability": {"type": "string"}, "project_id": {"type": "string"}, "provider_id": {"type": "string"}, "job_id": {"type": "string"}, "run_id": {"type": "string"}, "task_id": {"type": "string"}, "payload": {"type": "object"}, "idempotency_key": {"type": "string"}, "max_attempts": {"type": "number"}, "expires_at": {"type": "number"}},
+    "consume_approval": {"token_id": {"type": "string"}, "capability": {"type": "string"}, "project_id": {"type": "string"}, "provider_id": {"type": "string"}, "job_id": {"type": "string"}, "run_id": {"type": "string"}, "task_id": {"type": "string"}, "idempotency_key": {"type": "string"}, "payload": {"type": "object"}},
+    "authorize_action": {"capability": {"type": "string"}, "payload": {"type": "object"}, "token_id": {"type": "string"}, "destructive": {"type": "boolean"}, "external": {"type": "boolean"}, "project_id": {"type": "string"}, "provider_id": {"type": "string"}, "job_id": {"type": "string"}, "idempotency_key": {"type": "string"}, "run_id": {"type": "string"}, "task_id": {"type": "string"}, "execution": {"type": "object"}},
+    "authorize_runtime_action": {"capability": {"type": "string"}, "report": {"type": "object"}, "resource": {"type": "string"}, "task_id": {"type": "string"}, "run_id": {"type": "string"}, "worker_id": {"type": "string"}, "active_job": {"type": "boolean"}, "target_id": {"type": "string"}, "project_id": {"type": "string"}, "operation": {"type": "string", "enum": ["observe", "navigate", "reload_tab", "reload_extension", "restart"]}, "execution": {"type": "object"}},
+    "report_blocker": {"task_id": {"type": "string"}, "blocker": {"type": "string"}, "external_state_version": {"type": "string"}, "threshold": {"type": "number"}},
+    "review_evidence": {"task_id": {"type": "string"}},
+    "run_activity": {"run_id": {"type": "string"}},
+    "heartbeat": {"run_id": {"type": "string"}, "action": {"type": "string"}},
+    "queue_steering": {"run_id": {"type": "string"}, "instruction": {"type": "string"}, "scope": {"type": "string"}},
+    "refresh_authority": {"run_id": {"type": "string"}, "execution": {"type": "object"}, "context": {"type": "object"}},
 }
 
 # Managed runs are deliberately process-local: the MCP server owns the
 # subprocess handle, while durable task/run state remains in SQLite.
 ACTIVE_RUNS = {}
+
+def _external_publish_executor(payload):
+    raise NotImplementedError("publish executor is external")
+
+def _destructive_delete_executor(target):
+    raise NotImplementedError("delete executor is external")
 
 def _history_enabled(store: Store) -> bool:
     config = store.path.parent / "config.json"
@@ -82,13 +104,49 @@ def _resolved_provider(store: Store, task_id: str, worker_id: str, dispatch: dic
 def _history_limit(profile) -> int:
     return profile.context.history_limit
 
+def _authority(args: dict) -> AuthorityPolicy:
+    execution = args.get("execution", {}) or {}
+    mode = ExecutionMode(execution.get("mode", ExecutionMode.ISOLATED_SANDBOX.value))
+    capabilities = frozenset(execution.get("capabilities", ["filesystem.read", "provider.preflight"]))
+    return AuthorityPolicy(mode, capabilities)
+
+def _persisted_mutation_authority(store: Store, args: dict) -> AuthorityPolicy:
+    """Resolve mutation authority from the exact durable run/task scope.
+
+    Request execution capabilities can narrow the persisted set, never expand it.
+    """
+    run_id, task_id = args.get("run_id"), args.get("task_id")
+    if not run_id or not task_id:
+        raise PermissionError("mutation requires exact run_id and task_id")
+    run = store.db.execute("SELECT task_id FROM runs WHERE id=?", (run_id,)).fetchone()
+    if not run or run["task_id"] != task_id:
+        raise PermissionError("run/task scope mismatch")
+    row = store.authority_snapshot(run_id)
+    if not row: raise PermissionError("persisted run authority required")
+    persisted = frozenset(json.loads(row["capabilities"]))
+    requested = args.get("execution", {}).get("capabilities")
+    if requested is not None and not set(requested).issubset(persisted):
+        raise PermissionError("requested capabilities exceed persisted run authority")
+    caps = persisted if requested is None else frozenset(requested)
+    return AuthorityPolicy(ExecutionMode(row["mode"]), caps)
+
+def _context(args: dict):
+    value = (args.get("context") or {}).copy()
+    if not value: return None
+    if isinstance(value.get("runtime"), dict):
+        from .authority import RuntimeReport
+        value["runtime"] = RuntimeReport(**value["runtime"])
+    for key in ("authorizations", "prohibited_actions", "resources", "leases", "relevant_files", "acceptance_criteria", "stop_conditions"):
+        value[key] = tuple(value.get(key, ()))
+    return ContextPacket(**value)
+
 
 def dispatch(store: Store, method: str, args: dict) -> object:
     if method == "ping":
         return {}
     if method == "initialize":
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.2.0"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.3.0"},
                 "instructions": "You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
@@ -98,6 +156,26 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         raise ValueError(f"unsupported method: {method}")
     name, a = args.get("name"), args.get("arguments", {})
     if name == "status": return {"content": [{"type": "text", "text": json.dumps(store.snapshot())}]}
+    if name == "create_approval":
+        payload = a["payload"]
+        store.create_approval(ApprovalToken(a["token_id"], a["capability"], a["project_id"], a["provider_id"], a["job_id"], digest(payload), a["idempotency_key"], int(a.get("max_attempts", 1)), expires_at=float(a.get("expires_at", 0)), run_id=a["run_id"], task_id=a["task_id"]))
+        return {"content": [{"type": "text", "text": "approval created"}]}
+    if name == "consume_approval":
+        policy = AuthorityPolicy(capabilities=frozenset({a["capability"]}))
+        store.consume_approval(a["token_id"], policy, a["payload"], a["project_id"], a["provider_id"], a["job_id"], a["idempotency_key"], a["run_id"], a["task_id"])
+        return {"content": [{"type": "text", "text": "approval consumed"}]}
+    if name == "authorize_action":
+        authorize_action(store, _persisted_mutation_authority(store, a), a["capability"], a.get("payload", {}), a.get("token_id"), a.get("destructive", False), a.get("external", False), a.get("project_id"), a.get("provider_id"), a.get("job_id"), a.get("idempotency_key"), a.get("run_id"), a.get("task_id"))
+        return {"content": [{"type": "text", "text": "authorized"}]}
+    if name == "authorize_runtime_action":
+        from .authority import RuntimeReport
+        authorize_runtime_action(store, _persisted_mutation_authority(store, a), a["capability"], RuntimeReport(**a.get("report", {})), a.get("resource"), a.get("task_id"), a.get("worker_id"), a.get("active_job", False), a.get("target_id"), a.get("project_id"), a.get("operation"))
+        return {"content": [{"type": "text", "text": "runtime action authorized"}]}
+    if name == "report_blocker":
+        stopped = report_blocker(store, a["task_id"], a["blocker"], a["external_state_version"], int(a.get("threshold", 3)))
+        return {"content": [{"type": "text", "text": json.dumps({"stopped": stopped})}]}
+    if name == "review_evidence":
+        return {"content": [{"type": "text", "text": json.dumps(store.review_evidence(a["task_id"]))}]}
     if name == "control_status": return {"content": [{"type": "text", "text": json.dumps(store.control_snapshot(), ensure_ascii=False)}]}
     if name == "control_set_policy":
         store.control_set_policy(a["policy"]); return {"content": [{"type": "text", "text": "control policy updated"}]}
@@ -130,7 +208,7 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         if a.get("conversation_id") and _history_enabled(store):
             context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
-        result = run_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile)
+        result = run_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile, authority=_authority(a), context=_context(a))
         return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
     if name == "start_worker":
         key = (a["task_id"], a["worker_id"])
@@ -141,7 +219,7 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         if a.get("conversation_id") and _history_enabled(store):
             context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
-        run = start_managed_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile)
+        run = start_managed_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile, authority=_authority(a), context=_context(a))
         ACTIVE_RUNS[key] = run
         return {"content": [{"type": "text", "text": json.dumps({"session_id": run.session_id, "status": "RUNNING"})}]}
     if name == "pause_worker":
@@ -171,6 +249,16 @@ def dispatch(store: Store, method: str, args: dict) -> object:
     if name == "validate":
         exit_code = validate(store, a["task_id"], a["command"], a["cwd"], a.get("timeout", 300))
         return {"content": [{"type": "text", "text": json.dumps({"exit_code": exit_code})}]}
+    if name == "run_activity":
+        return {"content": [{"type": "text", "text": json.dumps(store.activity_snapshot(a["run_id"]), default=str)}]}
+    if name == "heartbeat":
+        store.heartbeat(a["run_id"], a.get("action")); return {"content": [{"type": "text", "text": "heartbeat recorded"}]}
+    if name == "queue_steering":
+        store.queue_steering(a["run_id"], a["instruction"], a["scope"]); return {"content": [{"type": "text", "text": "queued steering recorded"}]}
+    if name == "refresh_authority":
+        execution = a.get("execution", {}); policy = AuthorityPolicy(ExecutionMode(execution.get("mode", "isolated_sandbox")), frozenset(execution.get("capabilities", ["filesystem.read", "provider.preflight"])))
+        packet = ContextPacket(**a["context"]); store.refresh_run_authority(a["run_id"], policy, packet)
+        return {"content": [{"type": "text", "text": "authority refreshed"}]}
     if name == "reconcile": return {"content": [{"type": "text", "text": json.dumps({"recovered_tasks": store.reconcile()})}]}
     if name == "declare_resource":
         store.add_resource(a["name"], a["kind"], a.get("paths", [])); return {"content": [{"type": "text", "text": f"created {a['name']}"}]}
@@ -198,6 +286,27 @@ def dispatch(store: Store, method: str, args: dict) -> object:
             # The MCP server owns the store connection and closes it at shutdown.
             pass
         return {"content": [{"type": "text", "text": json.dumps({"commit": commit, "status": store.task(a["task_id"])["status"]})}]}
+    if name == "push_integration":
+        policy = _persisted_mutation_authority(store, a)
+        supervisor = Supervisor(store.path.parent.parent, store=store)
+        pushed = supervisor.push(a["remote"], a["branch"], policy, a["token_id"], a["project_id"], a["provider_id"], a["job_id"], a["idempotency_key"], a["run_id"], a["task_id"])
+        return {"content": [{"type": "text", "text": json.dumps({"result": pushed})}]}
+    if name == "provider_submit":
+        approval = a.get("approval", {}); scoped = {**a, **approval}
+        policy = _persisted_mutation_authority(store, scoped)
+        result = submit_provider(store, policy, a["provider"], a["job_id"], a["payload"], provider(a["provider"]).submit,
+                                 paid=a.get("paid", False), approval_scope=approval)
+        return {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}
+    if name == "external_publish":
+        approval = a.get("approval", {}); scoped = {**a, **approval}
+        policy = _persisted_mutation_authority(store, scoped)
+        result = publish_external(store, policy, a["payload"], _external_publish_executor, **approval)
+        return {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}
+    if name == "destructive_delete":
+        approval = a.get("approval", {}); scoped = {**a, **approval}
+        policy = _persisted_mutation_authority(store, scoped)
+        result = delete_destructive(store, policy, a["target"], _destructive_delete_executor, **approval)
+        return {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}
     if name == "arbitrate_conflict":
         result = arbitrate_conflict(store, a["task_id"], a["decision_id"], provider(a.get("provider", "codex")), a["evidence"], a["cwd"])
         return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "status": store.task(a["task_id"])["status"]})}]}

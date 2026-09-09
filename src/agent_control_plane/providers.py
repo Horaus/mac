@@ -10,6 +10,12 @@ from typing import Sequence
 from .profiles import ExecutionProfile, validate_profile
 
 
+def _packet_prompt(prompt: str, context_packet) -> str:
+    if context_packet is None:
+        return prompt
+    snapshot = context_packet.snapshot() if hasattr(context_packet, "snapshot") else context_packet
+    return prompt + "\n\nSUPERVISOR CONTEXT PACKET:\n" + json.dumps(snapshot, sort_keys=True, default=str)
+
 def _provider_env() -> dict[str, str]:
     """Provide a deterministic non-MCP stdin and system command PATH."""
     env = os.environ.copy()
@@ -61,30 +67,34 @@ class ProviderAdapter:
     def validate_profile(self, profile: ExecutionProfile) -> None:
         validate_profile(profile)
 
-    def run(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None) -> WorkerResult:
+    def submit(self, payload: dict):
+        raise NotImplementedError(f"{self.name} does not expose submission")
+
+    def run(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None, context_packet=None) -> WorkerResult:
         raise NotImplementedError
 
     def command(self, prompt: str, profile: ExecutionProfile | None = None) -> list[str]:
         raise NotImplementedError
 
-    def start(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None) -> "ManagedRun":
+    def start(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None, context_packet=None) -> "ManagedRun":
         self.validate_profile(profile or ExecutionProfile())
         try:
-            command = self.command(prompt, profile)
+            command = self.command(_packet_prompt(prompt, context_packet), profile)
         except TypeError:
             command = self.command(prompt)
         return ManagedRun(subprocess.Popen(command, cwd=cwd, text=True,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           stdin=subprocess.DEVNULL, env=_provider_env(), start_new_session=True), self)
+                                           stdin=subprocess.DEVNULL, env=_provider_env(), start_new_session=True), self, cwd)
 
     def resume(self, session_id: str, prompt: str, cwd: Path) -> "ManagedRun":
         raise NotImplementedError(f"{self.name} does not support session resume")
 
 
 class ManagedRun:
-    def __init__(self, process: subprocess.Popen, adapter: ProviderAdapter):
+    def __init__(self, process: subprocess.Popen, adapter: ProviderAdapter, cwd: Path | None = None):
         self.process = process
         self.adapter = adapter
+        self.cwd = Path(cwd or ".")
         self.session_id = f"pid:{process.pid}"
 
     def pause(self) -> None:
@@ -130,9 +140,9 @@ class CodexAdapter(ProviderAdapter):
         self.extra_args = tuple(extra_args)
         self.timeout = timeout
 
-    def run(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None) -> WorkerResult:
+    def run(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None, context_packet=None) -> WorkerResult:
         self.validate_profile(profile or ExecutionProfile())
-        exit_code, output = _run_provider_command(self.command(prompt, profile), cwd, self.timeout)
+        exit_code, output = _run_provider_command(self.command(_packet_prompt(prompt, context_packet), profile), cwd, self.timeout)
         if exit_code == 124:
             return WorkerResult(124, output + "\nprovider timeout\n")
         session_id = None
@@ -201,9 +211,9 @@ class CommandAdapter(ProviderAdapter):
             return [self.executable, *(prompt if arg == "{prompt}" else arg for arg in self.args)]
         return [self.executable, *self.args, prompt]
 
-    def run(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None) -> WorkerResult:
+    def run(self, prompt: str, cwd: Path, profile: ExecutionProfile | None = None, context_packet=None) -> WorkerResult:
         self.validate_profile(profile or ExecutionProfile())
-        exit_code, output = _run_provider_command(self.command(prompt, profile), cwd, self.timeout)
+        exit_code, output = _run_provider_command(self.command(_packet_prompt(prompt, context_packet), profile), cwd, self.timeout)
         if exit_code == 124:
             output += "\nprovider timeout\n"
         return WorkerResult(exit_code, output, usage=parse_usage(output), failure_class=classify_failure(exit_code, output))

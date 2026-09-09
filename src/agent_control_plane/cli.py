@@ -16,6 +16,8 @@ from .store import Store
 from .setup import connect_codex, doctor, run_setup, show_config, show_mcp_config
 from .profiles import resolve_profile
 from . import __version__
+from .authority import AuthorityPolicy, ApprovalToken, ExecutionMode, RuntimeReport, digest
+from .service import authorize_runtime_action
 
 def _release_info(root: Path) -> tuple[str, str]:
     try:
@@ -25,12 +27,23 @@ def _release_info(root: Path) -> tuple[str, str]:
     except (OSError, subprocess.CalledProcessError):
         return __version__, "unknown"
 
+def _source_version(root: Path) -> str:
+    """Read the installed source metadata after update, not this process import."""
+    metadata = root / "pyproject.toml"
+    try:
+        for line in metadata.read_text().splitlines():
+            if line.strip().startswith("version") and "=" in line:
+                return line.split("=", 1)[1].strip().strip('"\'')
+    except OSError:
+        pass
+    return __version__
+
 def _update_project(root: Path) -> list[str]:
     subprocess.run(["git", "fetch", "origin", "main"], cwd=root, capture_output=True, text=True, check=True)
     subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=root, capture_output=True, text=True, check=True)
     subprocess.run([str(_venv_python(root)), "-m", "pip", "install", "-e", "."], cwd=root, capture_output=True, text=True, check=True)
-    version, when = _release_info(root)
-    return [f"✓ Updated to version {version}.", f"✓ Update time: {when}.", "✓ Configuration and data were preserved."]
+    _, when = _release_info(root)
+    return [f"✓ Updated to version {_source_version(root)}.", f"✓ Update time: {when}.", "✓ Configuration and data were preserved."]
 
 def _venv_python(root: Path) -> Path:
     """Return the project's virtualenv interpreter on POSIX or Windows."""
@@ -250,6 +263,8 @@ def main(argv=None) -> int:
     run.add_argument("--cwd", default=None); run.add_argument("--prompt", required=True)
     run.add_argument("--provider", choices=["codex", "gemini"], default=None); run.add_argument("--conversation-id", default=None)
     run.add_argument("--model", default=None); run.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default=None)
+    run.add_argument("--mode", choices=[m.value for m in ExecutionMode], default=ExecutionMode.ISOLATED_SANDBOX.value)
+    run.add_argument("--capability", action="append", default=[])
     check = sub.add_parser("validate")
     check.add_argument("--task-id", required=True); check.add_argument("--cwd", default=None); check.add_argument("--timeout", type=float, default=300); check.add_argument("validation_command", nargs=argparse.REMAINDER)
     inbox = sub.add_parser("inbox")
@@ -261,6 +276,28 @@ def main(argv=None) -> int:
     knowledge_load = knowledge.add_parser("load"); knowledge_load.add_argument("path")
     knowledge_ack = knowledge.add_parser("ack"); knowledge_ack.add_argument("actor", choices=["boss", "worker"]); knowledge_ack.add_argument("--worker-id")
     sub.add_parser("reconcile")
+    activity = sub.add_parser("activity").add_subparsers(dest="activity_command", required=True)
+    activity_show = activity.add_parser("show"); activity_show.add_argument("run_id")
+    activity_heartbeat = activity.add_parser("heartbeat"); activity_heartbeat.add_argument("run_id"); activity_heartbeat.add_argument("--action")
+    activity_steer = activity.add_parser("queue-steering"); activity_steer.add_argument("run_id"); activity_steer.add_argument("instruction"); activity_steer.add_argument("--scope", required=True)
+    review = sub.add_parser("review").add_subparsers(dest="review_command", required=True)
+    review_evidence = review.add_parser("evidence")
+    review_evidence.add_argument("task_id")
+    runtime = sub.add_parser("runtime").add_subparsers(dest="runtime_command", required=True)
+    runtime_auth = runtime.add_parser("authorize")
+    runtime_auth.add_argument("--capability", required=True); runtime_auth.add_argument("--report", required=True)
+    runtime_auth.add_argument("--mode", choices=[m.value for m in ExecutionMode], default=ExecutionMode.OPEN_OPERATOR.value)
+    runtime_auth.add_argument("--resource"); runtime_auth.add_argument("--task-id"); runtime_auth.add_argument("--worker-id")
+    runtime_auth.add_argument("--active-job", action="store_true"); runtime_auth.add_argument("--target-id"); runtime_auth.add_argument("--project-id")
+    runtime_auth.add_argument("--operation", choices=["observe", "navigate", "reload_tab", "reload_extension", "restart"], required=True)
+    approval = sub.add_parser("approval").add_subparsers(dest="approval_command", required=True)
+    create_approval = approval.add_parser("create")
+    for name in ("token-id", "capability", "project-id", "provider-id", "job-id", "run-id", "task-id", "idempotency-key", "payload"):
+        create_approval.add_argument("--" + name, required=True)
+    create_approval.add_argument("--max-attempts", type=int, default=1); create_approval.add_argument("--expires-at", type=float, default=0)
+    consume_approval = approval.add_parser("consume")
+    for name in ("token-id", "capability", "project-id", "provider-id", "job-id", "run-id", "task-id", "idempotency-key", "payload"):
+        consume_approval.add_argument("--" + name, required=True)
     args = parser.parse_args(argv)
     path = state_path(args.project)
     store = Store(path)
@@ -285,6 +322,14 @@ def main(argv=None) -> int:
             except subprocess.CalledProcessError as error:
                 print(f"Update failed: {error.stderr or error}", file=sys.stderr)
                 return 1
+        elif args.command == "activity":
+            if args.activity_command == "show":
+                try: print(json.dumps(store.activity_snapshot(args.run_id), default=str))
+                except ValueError: print("unknown run", file=sys.stderr); return 1
+            elif args.activity_command == "heartbeat":
+                store.heartbeat(args.run_id, args.action); print("heartbeat recorded")
+            else:
+                store.queue_steering(args.run_id, args.instruction, args.scope); print("queued steering recorded")
         elif args.command == "task" and args.task_command == "create":
             execution = {k: v for k, v in {"model": args.model, "reasoning_effort": args.reasoning_effort}.items() if v is not None}
             store.add_task(args.id, args.title, args.provider, args.depends_on, execution); print(args.id)
@@ -317,7 +362,8 @@ def main(argv=None) -> int:
             task = store.task(args.task_id)
             task_override = json.loads(task["execution_json"]) if task and task["execution_json"] else {}
             profile = resolve_profile(config.get("execution", {}), worker_config, task_override, override)
-            result = run_worker(store, args.task_id, args.worker_id, provider(task_provider), prompt, cwd, profile=profile)
+            authority = AuthorityPolicy(ExecutionMode(args.mode), frozenset(args.capability or ["filesystem.read", "provider.preflight"]))
+            result = run_worker(store, args.task_id, args.worker_id, provider(task_provider), prompt, cwd, profile=profile, authority=authority)
             print(json.dumps({"exit_code": result.exit_code, "output": result.output, "status": store.task(args.task_id)["status"]}))
             return result.exit_code
         elif args.command == "validate":
@@ -337,6 +383,23 @@ def main(argv=None) -> int:
             store.acknowledge_knowledge(args.actor, args.worker_id); print("acknowledged")
         elif args.command == "reconcile":
             print(json.dumps({"recovered_tasks": store.reconcile()}))
+        elif args.command == "review" and args.review_command == "evidence":
+            print(json.dumps(store.review_evidence(args.task_id)))
+        elif args.command == "runtime" and args.runtime_command == "authorize":
+            policy = AuthorityPolicy(ExecutionMode(args.mode), frozenset({args.capability}))
+            authorize_runtime_action(store, policy, args.capability, RuntimeReport(**json.loads(args.report)), args.resource, args.task_id, args.worker_id, args.active_job, args.target_id, args.project_id, args.operation)
+            print(json.dumps({"authorized": True}))
+        elif args.command == "approval" and args.approval_command == "create":
+            payload = json.loads(args.payload)
+            token = ApprovalToken(args.token_id, args.capability, args.project_id, args.provider_id, args.job_id,
+                                  digest(payload), args.idempotency_key, args.max_attempts, expires_at=args.expires_at,
+                                  run_id=args.run_id, task_id=args.task_id)
+            store.create_approval(token); print(args.token_id)
+        elif args.command == "approval" and args.approval_command == "consume":
+            payload = json.loads(args.payload)
+            policy = AuthorityPolicy(capabilities=frozenset({args.capability}))
+            store.consume_approval(args.token_id, policy, payload, args.project_id, args.provider_id, args.job_id,
+                                   args.idempotency_key, args.run_id, args.task_id); print(json.dumps({"consumed": True}))
     finally:
         store.close()
     return 0

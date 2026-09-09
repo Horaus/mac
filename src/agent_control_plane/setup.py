@@ -400,7 +400,28 @@ def connect_codex(project: str | Path, force: bool = False) -> Path:
     return target
 
 def doctor(project: str | Path, port: int = 8765) -> int:
+    from .identity import identity_mismatches, installation_identity
+    from . import __version__
     root = Path(project).resolve(); state = root / ".agent-control-plane"
+    identity = installation_identity(root)
+    from .store import Store
+    identity["runtime_version"] = __version__
+    state.mkdir(parents=True, exist_ok=True)
+    identity_store = Store(state / "state.sqlite3")
+    persisted_identity = identity_store.identity()
+    if persisted_identity is None:
+        identity_store.record_identity(identity)
+    identity_store.record_identity_observation(identity)
+    identity_store.close()
+    config_path = state / "config.json"
+    expected = {}
+    if config_path.exists():
+        try: expected = json.loads(config_path.read_text()).get("installation", {})
+        except (OSError, json.JSONDecodeError): expected = {}
+    persisted_expected = {key: value for key, value in (persisted_identity or {}).items()
+                          if key not in {"dirty", "update_channel"}}
+    mismatches = sorted(set(identity_mismatches(identity, expected) +
+                           identity_mismatches(identity, persisted_expected)))
     ready_providers = {name for name, _ in _scan_providers()}
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.4) as response:
@@ -408,13 +429,19 @@ def doctor(project: str | Path, port: int = 8765) -> int:
     except Exception:
         background = False
     checks = [("project", root.exists()), ("state", (state / "state.sqlite3").exists()),
+              ("launcher", Path(identity["launcher"]).exists()), ("mcp-state", Path(identity["state"]).exists()),
               ("config", (state / "config.json").exists()), ("codex", "codex" in ready_providers),
               ("gemini", "gemini" in ready_providers), ("background-http", background)]
     print("\nAgent Control Plane · doctor\n")
     for name, ok in checks: print(f"  [{'✓' if ok else '!'}] {name}")
+    print(f"  [i] source={identity.get('source') or 'unknown'} revision={identity.get('revision') or 'unknown'} version={__version__} package={identity.get('package_version') or 'unknown'}")
+    print(f"  [i] launcher={identity['launcher']} state={identity['state']} dirty={identity['dirty']}")
+    print(f"  [i] mcp={identity['mcp_command']} {' '.join(identity['mcp_args'])}")
+    if mismatches:
+        print(f"  [!] installation identity mismatch: {', '.join(mismatches)}")
     if not checks[1][1]: print("\n  Next: acp --project . init")
-    if not checks[2][1]: print("  Next: acp --project . setup")
-    if not checks[3][1] and not checks[4][1]: print("  Install Codex or Gemini, then run acp doctor again")
+    if not checks[4][1]: print("  Next: acp --project . setup")
+    if not checks[5][1] and not checks[6][1]: print("  Install Codex or Gemini, then run acp doctor again")
     if background: print("  Background service is alive; terminal may close")
     else: print("  Background service is not detected; stdio host must remain open")
-    return 0 if all(ok for _, ok in checks[:3]) and any(ok for _, ok in checks[3:]) else 1
+    return 0 if all(ok for _, ok in checks[:4]) and any(ok for name, ok in checks if name in {"codex", "gemini"}) else 1

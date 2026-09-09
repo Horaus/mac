@@ -26,6 +26,19 @@ profile, reasoning effort và sandbox riêng. Để trống một mục nếu mu
 cấu hình mặc định của provider. Model chỉ chạy được khi tài khoản/provider hiện
 tại có quyền sử dụng model đó.
 
+##### Tình trạng provider và kiểm thử của phiên bản 0.3.0
+
+- Codex là provider đã được chạy kiểm thử thực tế trong môi trường phát hành.
+- Tích hợp Gemini vẫn có trong MAC, nhưng chưa được kiểm thử runtime end-to-end
+  ở bản này vì môi trường tài khoản/nhà phát hành hiện tại đang giới hạn quyền
+  chạy. Đây không phải là cam kết rằng mọi tài khoản Gemini đều bị khóa.
+- Model cụ thể, bao gồm Luna, chỉ dùng được khi CLI và tài khoản hiện tại cấp
+  quyền. MAC không tự fallback sang model khác mà không báo lỗi.
+- Browser/CDP/Electron thật, paid submission thật, live steering và giới hạn
+  token cứng do provider thực thi vẫn là các kiểm chứng bên ngoài chưa chạy.
+  MAC đã có kiểm thử local/fake cho policy, lease, approval, recovery và
+  acceptance gate tương ứng.
+
 ##### Hệ điều hành được hỗ trợ
 
 - **Windows 10 và Windows 11:** dùng PowerShell và <code>bootstrap.ps1</code>.
@@ -85,7 +98,7 @@ Sau khi script hoàn tất, mở Terminal mới (nếu cần) rồi chạy:
 
 #### 2. Kết nối với ứng dụng AI
 
-Terminal dùng để cài MAC; sử dụng khung chat để yêu cầu AI kết nối tới MAC qua MCP và thực hiện các tuyyf chọn cần thiết. Bạn có thể chat trong bất kỳ project nào, không cần mở thư mục
+Terminal dùng để cài MAC; sử dụng khung chat để yêu cầu AI kết nối tới MAC qua MCP và thực hiện các tùy chọn cần thiết. Bạn có thể chat trong bất kỳ project nào, không cần mở thư mục
 <code>mac</code>.
 
 Nếu AI chưa biết MAC, gửi câu này:
@@ -96,7 +109,7 @@ Nếu ứng dụng AI đã nạp MAC MCP, chỉ cần gửi:
 
     Kết nối MAC MCP và thực hiện yêu cầu sau: <yêu cầu>
 
-AI sẽ nạp quy tắc vận hành do MAC cung cấp và hỏi thêm thông tin khi cần. Quá ttrinhf ày diễn ra tự động
+AI sẽ nạp quy tắc vận hành do MAC cung cấp và hỏi thêm thông tin khi cần. Quá trình này diễn ra tự động.
 Phần cấu hình bên dưới dành cho AI agent đọc; người dùng không cần chép các lệnh MCP vào khung chat.
 
 #### 3. Cập nhật
@@ -105,7 +118,7 @@ Phần cấu hình bên dưới dành cho AI agent đọc; người dùng không
     git pull
     ./scripts/bootstrap.sh .
 
-Hoặc cập nhập trực tiếp trong menu MAC khi gọi lệnh "mac" trên Terminal
+Hoặc cập nhật trực tiếp trong menu MAC sau khi gọi lệnh <code>mac</code> trên Terminal.
 
 #### 4. Gỡ cài đặt
 
@@ -185,6 +198,20 @@ In the **Workers** tab, select a worker and press `x` to configure its model,
 Codex profile, reasoning effort, and sandbox. Leave a field blank to inherit
 the provider default. A configured model can run only when the current account
 and provider are entitled to use it.
+
+##### Provider and verification status for version 0.3.0
+
+- Codex is the provider exercised in the release environment's real-provider
+  checks.
+- Gemini integration remains available, but this release has not verified its
+  runtime end to end because the current publisher/account environment blocks
+  that test. This does not mean every Gemini account is locked.
+- A specific model, including Luna, works only when the current CLI and account
+  are entitled to it. MAC does not silently fall back to another model.
+- Real browser/CDP/Electron operation, real paid submission, live steering, and
+  provider-native hard token enforcement remain externally deferred. MAC covers
+  the corresponding policy, lease, approval, recovery, and acceptance behavior
+  with local/fake tests.
 
 ##### Supported operating systems
 

@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS runs (
   worker_id TEXT NOT NULL, provider TEXT NOT NULL, session_id TEXT,
   status TEXT NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '', profile_json TEXT NOT NULL DEFAULT '{}',
   input_tokens INTEGER, cached_input_tokens INTEGER, output_tokens INTEGER, failure_class TEXT,
-  started_at REAL NOT NULL, finished_at REAL
+  output_omitted_bytes INTEGER NOT NULL DEFAULT 0, output_provenance TEXT,
+  tool_output_bytes INTEGER NOT NULL DEFAULT 0, files_read INTEGER NOT NULL DEFAULT 0,
+  commands_executed INTEGER NOT NULL DEFAULT 0, soft_budget_exceeded INTEGER NOT NULL DEFAULT 0,
+  started_at REAL NOT NULL, finished_at REAL, heartbeat_at REAL, action_count INTEGER NOT NULL DEFAULT 0,
+  steering_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, task_id TEXT,
@@ -93,6 +97,50 @@ CREATE TABLE IF NOT EXISTS control_queue (
 CREATE TABLE IF NOT EXISTS control_settings (
   id INTEGER PRIMARY KEY CHECK(id=1), policy TEXT NOT NULL DEFAULT 'shared_queue', updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS run_authority (
+  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', context_digest TEXT,
+  context_json TEXT, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS approvals (
+  token_id TEXT PRIMARY KEY, capability TEXT NOT NULL, project_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL, job_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL, max_attempts INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at REAL NOT NULL DEFAULT 0, invalidated INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL,
+  run_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS blocker_events (
+  task_id TEXT NOT NULL, blocker_key TEXT NOT NULL, external_state_version TEXT NOT NULL,
+  count INTEGER NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(task_id, blocker_key)
+);
+CREATE TABLE IF NOT EXISTS installation_identity (
+  id INTEGER PRIMARY KEY CHECK(id=1), identity_json TEXT NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS installation_identity_no_update
+BEFORE UPDATE ON installation_identity BEGIN SELECT RAISE(ABORT, 'installation identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS installation_identity_no_delete
+BEFORE DELETE ON installation_identity BEGIN SELECT RAISE(ABORT, 'installation identity is immutable'); END;
+CREATE TABLE IF NOT EXISTS identity_observations (
+  observation_id INTEGER PRIMARY KEY AUTOINCREMENT, identity_json TEXT NOT NULL, observed_at REAL NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS identity_observations_no_update
+BEFORE UPDATE ON identity_observations BEGIN SELECT RAISE(ABORT, 'identity observations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS identity_observations_no_delete
+BEFORE DELETE ON identity_observations BEGIN SELECT RAISE(ABORT, 'identity observations are append-only'); END;
+CREATE TABLE IF NOT EXISTS review_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, payload TEXT NOT NULL, violation INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS authority_events (
+  event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL,
+  project_id TEXT NOT NULL, provider_id TEXT NOT NULL, job_id TEXT NOT NULL,
+  kind TEXT NOT NULL, payload_json TEXT NOT NULL, provenance TEXT NOT NULL,
+  payload_hash TEXT NOT NULL, created_at REAL NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS authority_events_no_update
+BEFORE UPDATE ON authority_events BEGIN SELECT RAISE(ABORT, 'authority events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS authority_events_no_delete
+BEFORE DELETE ON authority_events BEGIN SELECT RAISE(ABORT, 'authority events are append-only'); END;
 """
 
 
@@ -126,9 +174,17 @@ class Store:
             self.db.execute("ALTER TABLE tasks ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(runs)")}
         for name, definition in (("profile_json", "TEXT NOT NULL DEFAULT '{}'"), ("input_tokens", "INTEGER"),
-                                 ("cached_input_tokens", "INTEGER"), ("output_tokens", "INTEGER"), ("failure_class", "TEXT")):
+                                 ("cached_input_tokens", "INTEGER"), ("output_tokens", "INTEGER"), ("failure_class", "TEXT"),
+                                 ("output_omitted_bytes", "INTEGER NOT NULL DEFAULT 0"), ("output_provenance", "TEXT"),
+                                 ("tool_output_bytes", "INTEGER NOT NULL DEFAULT 0"), ("files_read", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("commands_executed", "INTEGER NOT NULL DEFAULT 0"), ("soft_budget_exceeded", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("heartbeat_at", "REAL"), ("action_count", "INTEGER NOT NULL DEFAULT 0"), ("steering_json", "TEXT NOT NULL DEFAULT '[]'")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+        approval_columns = {row[1] for row in self.db.execute("PRAGMA table_info(approvals)")}
+        for name in ("run_id", "task_id"):
+            if name not in approval_columns:
+                self.db.execute(f"ALTER TABLE approvals ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     def close(self) -> None:
@@ -323,7 +379,137 @@ class Store:
         ).fetchone()
         if passed is None:
             raise ValueError("at least one passing validation is required before acceptance")
+        latest = self.latest_run(task_id)
+        if latest and self.authority_snapshot(latest["id"]):
+            evidence = self.review_evidence(task_id)
+            if evidence:
+                raise ValueError("required review evidence missing: " + ", ".join(evidence))
         self.set_task_status(task_id, "ACCEPTED")
+
+    def review_evidence(self, task_id: str) -> list[str]:
+        """Return deterministic missing evidence for an authority-managed review."""
+        latest = self.latest_run(task_id)
+        if not latest: return ["run"]
+        authority = self.authority_snapshot(latest["id"])
+        missing = []
+        if not authority: missing.append("authority policy")
+        elif not authority.get("context_digest"): missing.append("context packet digest")
+        if latest["output"] == "": missing.append("worker output")
+        passed = self.db.execute("SELECT 1 FROM validations WHERE task_id=? AND exit_code=0 AND created_at>? LIMIT 1", (task_id, latest["started_at"])).fetchone()
+        if passed is None: missing.append("passing validation")
+        events = self.authority_events(latest["id"], task_id)
+        missing.extend(self._validate_authority_events(latest, events))
+        event_kinds = {event["kind"] for event in events}
+        for required in ("policy_resolved", "provider_result", "validation_result"):
+            if required not in event_kinds: missing.append(required + " event")
+        if any(event["provenance"] not in {"provider", "supervisor", "runtime_adapter", "store"} for event in events):
+            missing.append("trusted event provenance")
+        expected_project = self.project_id()
+        if any(event["run_id"] != latest["id"] or event["task_id"] != task_id or
+               event["provider_id"] != latest["provider"] or event["job_id"] != latest["id"] or
+               event["project_id"] != expected_project for event in events):
+            missing.append("exact event scope")
+        if any(event["kind"] == "policy_violation" for event in events): missing.append("recorded policy violation")
+        return missing
+
+    def _validate_authority_events(self, run, events) -> list[str]:
+        from .authority import digest
+        errors = []
+        terminal = []
+        for event in events:
+            try: payload = json.loads(event["payload_json"])
+            except (TypeError, json.JSONDecodeError): errors.append("invalid event payload"); continue
+            if digest(payload) != event["payload_hash"]: errors.append("event payload hash mismatch")
+            required = {
+                "policy_resolved": ("policy", "context_digest"),
+                "provider_result": ("status", "exit_code", "output_bytes", "usage"),
+                "validation_result": ("validation_id", "run_id", "command", "exit_code", "output_bytes"),
+                "lease_acquired": ("resource", "mode", "worker_id"),
+                "approval_consumed": ("token_id", "capability", "project_id", "provider_id", "job_id", "run_id", "task_id", "idempotency_key", "payload_hash"),
+                "runtime_mutation_granted": ("capability", "operation", "resource"),
+                "runtime_mutation_denied": ("capability", "reason", "resource"),
+            }.get(event["kind"], ())
+            if any(key not in payload for key in required): errors.append("invalid " + event["kind"] + " schema")
+            if event["kind"] == "provider_result": terminal.append((payload.get("status"), payload.get("exit_code")))
+            if event["kind"] == "validation_result":
+                row = self.db.execute("SELECT * FROM validations WHERE id=? AND task_id=?", (payload.get("validation_id"), run["task_id"])).fetchone()
+                if (not row or payload.get("run_id") != run["id"] or row["command"] != payload.get("command") or
+                    row["exit_code"] != payload.get("exit_code") or len(row["output"].encode("utf-8")) != payload.get("output_bytes")):
+                    errors.append("validation event conflicts with durable validation row")
+            if event["kind"] == "approval_consumed":
+                approval = self.db.execute("SELECT * FROM approvals WHERE token_id=?", (payload.get("token_id"),)).fetchone()
+                if not approval or any(payload.get(key) != approval[key] for key in ("capability", "project_id", "provider_id", "job_id", "run_id", "task_id", "idempotency_key", "payload_hash")):
+                    errors.append("approval event scope conflicts with durable approval")
+            if event["kind"] == "provider_result":
+                expected_usage = {"input_tokens": run["input_tokens"], "cached_input_tokens": run["cached_input_tokens"], "output_tokens": run["output_tokens"]}
+                usage = payload.get("usage") or {}
+                if (payload.get("status") != run["status"] or payload.get("exit_code") != run["exit_code"] or
+                    payload.get("output_bytes") != len((run["output"] or "").encode("utf-8")) or
+                    any(usage.get(k) != v for k, v in expected_usage.items())):
+                    errors.append("provider event conflicts with durable run")
+        if len(set(terminal)) > 1: errors.append("conflicting provider terminal events")
+        return errors
+
+    def record_review_evidence(self, *args, **kwargs) -> None:
+        raise PermissionError("generic review evidence is disabled; use owning event emitters")
+
+    def _emit_policy_violation(self, run_id: str, payload: dict) -> None:
+        self._emit_owned(run_id, "policy_violation", payload, "supervisor")
+
+    def record_authority_event(self, *args, **kwargs) -> None:
+        raise PermissionError("authority events must be emitted by a dedicated owning boundary")
+
+    def _append_authority_event(self, event_id: str, run_id: str, task_id: str, project_id: str,
+                               provider_id: str, job_id: str, kind: str, payload: dict,
+                               provenance: str) -> None:
+        from .authority import digest
+        if not all((event_id, run_id, task_id, project_id, provider_id, job_id, kind, provenance)):
+            raise PermissionError("authority event scope is mandatory")
+        if not isinstance(payload, dict): raise TypeError("authority event payload must be an object")
+        self.db.execute("INSERT INTO authority_events(event_id,run_id,task_id,project_id,provider_id,job_id,kind,payload_json,provenance,payload_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (event_id, run_id, task_id, project_id, provider_id, job_id, kind,
+                         json.dumps(payload, sort_keys=True), provenance, digest(payload), self._now()))
+        self.db.commit()
+
+    def _emit_owned(self, run_id: str, kind: str, payload: dict, provenance: str) -> None:
+        run = self.db.execute("SELECT task_id,provider FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not run: raise ValueError("unknown run")
+        self._append_authority_event(f"event-{__import__('uuid').uuid4().hex}", run_id, run["task_id"],
+                                    self.project_id(), run["provider"], run_id,
+                                    kind, payload, provenance)
+
+    def project_id(self) -> str:
+        identity = self.identity()
+        if not identity or not identity.get("root"):
+            identity = {"root": str(self.path.parent.parent.resolve()), "state": str(self.path.resolve())}
+            self.record_identity(identity)
+        return identity["root"]
+
+    def _emit_policy_resolved(self, run_id, policy, context_digest):
+        self._emit_owned(run_id, "policy_resolved", {"policy": policy.snapshot(), "context_digest": context_digest}, "supervisor")
+    def _emit_provider_result(self, run_id, status, exit_code, output_bytes, usage):
+        self._emit_owned(run_id, "provider_result", {"status": status, "exit_code": exit_code, "output_bytes": output_bytes, "usage": usage}, "provider")
+    def _emit_validation_result(self, run_id, validation_id, command, exit_code, output_bytes):
+        self._emit_owned(run_id, "validation_result", {"validation_id": validation_id, "run_id": run_id, "command": command, "exit_code": exit_code, "output_bytes": output_bytes}, "supervisor")
+    def _emit_lease_acquired(self, run_id, resource, mode, worker_id):
+        self._emit_owned(run_id, "lease_acquired", {"resource": resource, "mode": mode, "worker_id": worker_id}, "store")
+    def _emit_approval_consumed(self, run_id, payload):
+        self._emit_owned(run_id, "approval_consumed", payload, "store")
+    def _emit_runtime_granted(self, run_id, payload):
+        self._emit_owned(run_id, "runtime_mutation_granted", payload, "runtime_adapter")
+    def _emit_runtime_denied(self, run_id, payload):
+        self._emit_owned(run_id, "runtime_mutation_denied", payload, "runtime_adapter")
+    def _emit_diff_observed(self, run_id, payload): self._emit_owned(run_id, "diff_observed", payload, "supervisor")
+    def _emit_integration_preflight(self, run_id, payload): self._emit_owned(run_id, "integration_preflight", payload, "supervisor")
+    def _emit_mutation_preflight(self, run_id, payload): self._emit_owned(run_id, "mutation_preflight", payload, "store")
+
+    def authority_events(self, run_id: str, task_id: str | None = None):
+        query = "SELECT * FROM authority_events WHERE run_id=?"; args = [run_id]
+        if task_id is not None: query += " AND task_id=?"; args.append(task_id)
+        return [dict(row) for row in self.db.execute(query, args)]
+
+    def review_evidence_rows(self, run_id: str):
+        return [dict(row) for row in self.db.execute("SELECT * FROM review_evidence WHERE run_id=? ORDER BY id", (run_id,))]
 
     def reject_task(self, task_id: str, reason: str) -> None:
         self.set_task_status(task_id, "REPAIR")
@@ -337,7 +523,7 @@ class Store:
     def resume_task(self, task_id: str) -> None:
         task = self.task(task_id)
         if task is None: raise ValueError(f"unknown task: {task_id}")
-        if task["status"] not in ("PAUSED", "WAITING_RESOURCE", "WAITING_DEPENDENCY", "STALE", "REPAIR"):
+        if task["status"] not in ("PAUSED", "WAITING_RESOURCE", "WAITING_DEPENDENCY", "WAITING_DECISION", "STALE", "REPAIR"):
             raise ValueError(f"task {task_id} is not resumable from {task['status']}")
         self.set_task_status(task_id, "READY" if self.dependencies_ready(task_id) else "WAITING_DEPENDENCY")
 
@@ -348,7 +534,7 @@ class Store:
     def retry_task(self, task_id: str, worker_id: str | None = None) -> None:
         task = self.task(task_id)
         if task is None: raise ValueError(f"unknown task: {task_id}")
-        if task["status"] not in ("FAILED", "REPAIR", "DISPUTED", "STALE"):
+        if task["status"] not in ("FAILED", "REPAIR", "DISPUTED", "STALE", "WAITING_DECISION"):
             raise ValueError(f"task {task_id} is not retryable from {task['status']}")
         self.release_task_leases(task_id)
         if worker_id:
@@ -460,6 +646,9 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO leases(resource,task_id,worker_id,mode,acquired_at,expires_at) VALUES(?,?,?,?,?,?)",
                             (resource, task_id, worker_id, mode, now, now + ttl))
             self.db.commit()
+            latest = self.latest_run(task_id)
+            if latest:
+                self._emit_lease_acquired(latest["id"], resource, mode, worker_id)
             return True
         except Exception:
             self.db.rollback()
@@ -512,17 +701,135 @@ class Store:
                         (run_id, task_id, worker_id, provider, session_id, "RUNNING", profile_json, self._now()))
         self.db.commit()
 
+    def record_run_authority(self, run_id: str, policy, context=None) -> None:
+        from .authority import digest
+        snapshot = context.snapshot() if hasattr(context, "snapshot") else context
+        self.db.execute("INSERT OR REPLACE INTO run_authority(run_id,mode,capabilities,context_digest,context_json,created_at) VALUES(?,?,?,?,?,?)",
+                        (run_id, policy.mode.value, json.dumps(sorted(policy.capabilities)), digest(snapshot) if snapshot else None,
+                         json.dumps(snapshot, sort_keys=True) if snapshot else None, self._now()))
+        self.db.commit()
+        self._emit_policy_resolved(run_id, policy, digest(snapshot) if snapshot else None)
+
+    def refresh_run_authority(self, run_id: str, policy, context) -> None:
+        """Supervisor-only durable refresh after a material authority/state change."""
+        if not self.db.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone():
+            raise ValueError("unknown run")
+        self.record_run_authority(run_id, policy, context)
+        self._emit_policy_resolved(run_id, policy, context.digest() if hasattr(context, "digest") else None)
+
+    def authority_snapshot(self, run_id: str):
+        row = self.db.execute("SELECT * FROM run_authority WHERE run_id=?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def create_approval(self, token) -> None:
+        if not all((token.project_id, token.provider_id, token.job_id, token.idempotency_key, token.run_id, token.task_id)):
+            raise PermissionError("approval scope must include run, task, project, provider, job, and idempotency key")
+        self.db.execute("INSERT INTO approvals(token_id,capability,project_id,provider_id,job_id,payload_hash,idempotency_key,max_attempts,attempts,expires_at,invalidated,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (token.token_id, token.capability, token.project_id, token.provider_id, token.job_id,
+                         token.payload_hash, token.idempotency_key, token.max_attempts, token.attempts,
+                         token.expires_at, int(token.invalidated), self._now()))
+        self.db.execute("UPDATE approvals SET run_id=?,task_id=? WHERE token_id=?", (token.run_id, token.task_id, token.token_id))
+        self.db.commit()
+
+    def consume_approval(self, token_id: str, policy, payload, project_id=None, provider_id=None,
+                         job_id=None, idempotency_key=None, run_id=None, task_id=None):
+        from .authority import ApprovalToken
+        if not all((project_id, provider_id, job_id, idempotency_key, run_id, task_id)):
+            raise PermissionError("approval scope is mandatory")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute("SELECT * FROM approvals WHERE token_id=?", (token_id,)).fetchone()
+            if not row:
+                raise PermissionError("approval token not found")
+            values = {key: row[key] for key in ("token_id", "capability", "project_id", "provider_id", "job_id",
+                                             "payload_hash", "idempotency_key", "max_attempts", "attempts", "expires_at", "run_id", "task_id")}
+            values["invalidated"] = bool(row["invalidated"])
+            token = ApprovalToken(**values)
+            if not token.usable(policy, payload, project_id=project_id, provider_id=provider_id,
+                                job_id=job_id, idempotency_key=idempotency_key,
+                                run_id=run_id, task_id=task_id):
+                raise PermissionError("approval token is invalid, expired, exhausted, or payload-bound differently")
+            updated = self.db.execute("UPDATE approvals SET attempts=attempts+1 WHERE token_id=? AND attempts<? AND invalidated=0",
+                                      (token_id, token.max_attempts)).rowcount
+            if updated != 1: raise PermissionError("approval token was consumed concurrently")
+            self.db.commit()
+            if token.run_id and self.db.execute("SELECT 1 FROM runs WHERE id=?", (token.run_id,)).fetchone():
+                self._emit_approval_consumed(token.run_id, {"token_id": token_id, "capability": token.capability,
+                                                                          "project_id": token.project_id, "provider_id": token.provider_id,
+                                                                          "job_id": token.job_id, "run_id": token.run_id,
+                                                                          "task_id": token.task_id, "idempotency_key": token.idempotency_key,
+                                                                          "payload_hash": token.payload_hash, "attempt": token.attempts + 1})
+            return token
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def invalidate_approval(self, token_id: str) -> None:
+        self.db.execute("UPDATE approvals SET invalidated=1 WHERE token_id=?", (token_id,))
+        self.db.commit()
+
+    def record_identity(self, identity: dict) -> None:
+        base = dict(identity)
+        base.pop("dirty", None)
+        base.pop("update_channel", None)
+        encoded = json.dumps(base, sort_keys=True)
+        existing = self.db.execute("SELECT identity_json FROM installation_identity WHERE id=1").fetchone()
+        if existing:
+            if existing[0] != encoded: raise PermissionError("installation identity cannot be replaced in place")
+            return
+        self.db.execute("INSERT INTO installation_identity(id,identity_json,updated_at) VALUES(1,?,?)", (encoded, self._now()))
+        self.db.commit()
+
+    def record_identity_observation(self, identity: dict) -> None:
+        self.db.execute("INSERT INTO identity_observations(identity_json,observed_at) VALUES(?,?)",
+                        (json.dumps(identity, sort_keys=True), self._now()))
+        self.db.commit()
+
+    def identity(self):
+        row = self.db.execute("SELECT identity_json FROM installation_identity WHERE id=1").fetchone()
+        return json.loads(row[0]) if row else None
+
+    def record_blocker(self, task_id: str, blocker_key: str, external_state_version: str, threshold: int = 3) -> bool:
+        row = self.db.execute("SELECT external_state_version,count FROM blocker_events WHERE task_id=? AND blocker_key=?", (task_id, blocker_key)).fetchone()
+        count = row["count"] + 1 if row and row["external_state_version"] == external_state_version else 1
+        self.db.execute("INSERT OR REPLACE INTO blocker_events(task_id,blocker_key,external_state_version,count,updated_at) VALUES(?,?,?,?,?)",
+                        (task_id, blocker_key, external_state_version, count, self._now()))
+        self.db.commit(); return count >= threshold
+
     def finish_run(self, run_id: str, status: str, exit_code: int, output: str, session_id: str | None = None,
                    failure_class: str | None = None, usage: dict | None = None) -> None:
-        self.db.execute("UPDATE runs SET status=?,exit_code=?,output=?,session_id=COALESCE(?,session_id),failure_class=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,finished_at=? WHERE id=?",
+        meta = usage or {}
+        self.db.execute("UPDATE runs SET status=?,exit_code=?,output=?,session_id=COALESCE(?,session_id),failure_class=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,output_omitted_bytes=?,output_provenance=?,tool_output_bytes=?,files_read=?,commands_executed=?,soft_budget_exceeded=?,finished_at=? WHERE id=?",
                         (status, exit_code, output, session_id, failure_class, (usage or {}).get("input_tokens"),
-                         (usage or {}).get("cached_input_tokens"), (usage or {}).get("output_tokens"), self._now(), run_id))
+                         (usage or {}).get("cached_input_tokens"), (usage or {}).get("output_tokens"), meta.get("output_omitted_bytes", 0), meta.get("output_provenance"), meta.get("tool_output_bytes", 0), meta.get("files_read", 0), meta.get("commands_executed", 0), int(meta.get("soft_budget_exceeded", False)), self._now(), run_id))
         self.db.commit()
+        self._emit_provider_result(run_id, status, exit_code, len(output.encode("utf-8")), meta)
 
     def latest_run(self, task_id: str, worker_id: str | None = None):
         if worker_id is None:
             return self.db.execute("SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task_id,)).fetchone()
         return self.db.execute("SELECT * FROM runs WHERE task_id=? AND worker_id=? ORDER BY started_at DESC LIMIT 1", (task_id, worker_id)).fetchone()
+
+    def heartbeat(self, run_id: str, action: str | None = None) -> None:
+        if not self.db.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone(): raise ValueError("unknown run")
+        self.db.execute("UPDATE runs SET heartbeat_at=?, action_count=action_count+? WHERE id=?", (self._now(), int(action is not None), run_id))
+        self.db.commit()
+
+    def activity_snapshot(self, run_id: str) -> dict[str, Any]:
+        run = self.db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not run: raise ValueError("unknown run")
+        return {"run": dict(run), "authority": self.authority_snapshot(run_id),
+                "events": self.authority_events(run_id),
+                "validations": [dict(row) for row in self.db.execute("SELECT * FROM validations WHERE task_id=? ORDER BY id", (run["task_id"],))],
+                "leases": [dict(row) for row in self.db.execute("SELECT * FROM leases WHERE task_id=?", (run["task_id"],))],
+                "messages": [dict(row) for row in self.db.execute("SELECT * FROM messages WHERE task_id=? ORDER BY id", (run["task_id"],))]}
+
+    def queue_steering(self, run_id: str, instruction: str, scope: str) -> None:
+        if not instruction or not scope: raise ValueError("scoped queued steering requires instruction and scope")
+        row = self.db.execute("SELECT steering_json FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not row: raise ValueError("unknown run")
+        items = json.loads(row[0]); items.append({"instruction": instruction, "scope": scope, "created_at": self._now()})
+        self.db.execute("UPDATE runs SET steering_json=? WHERE id=?", (json.dumps(items, sort_keys=True), run_id)); self.db.commit()
 
     def reconcile(self) -> list[str]:
         """Recover externally-dead managed processes without trusting stale locks."""
@@ -572,9 +879,12 @@ class Store:
         self.db.commit()
 
     def add_validation(self, task_id: str, command: str, exit_code: int, output: str) -> None:
-        self.db.execute("INSERT INTO validations(task_id,command,exit_code,output,created_at) VALUES(?,?,?,?,?)",
+        cursor = self.db.execute("INSERT INTO validations(task_id,command,exit_code,output,created_at) VALUES(?,?,?,?,?)",
                         (task_id, command, exit_code, output, self._now()))
         self.db.commit()
+        latest = self.latest_run(task_id)
+        if latest:
+            self._emit_validation_result(latest["id"], cursor.lastrowid, command, exit_code, len(output.encode("utf-8")))
 
     def record_integration(self, task_id: str, commit: str, strategy: str = "cherry-pick") -> None:
         self.db.execute("INSERT INTO integrations(task_id,commit_hash,strategy,status,created_at) VALUES(?,?,?,?,?)",
