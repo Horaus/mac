@@ -10,6 +10,12 @@ acp --project /path/to/project validate --task-id feature --cwd /path/to/worktre
 acp --project /path/to/project accept feature
 ```
 
+Run `mac`, open the **Workers** tab, and press `x` on a worker to configure its
+model, Codex profile, reasoning effort, sandbox, and context policy. Blank
+execution fields inherit provider defaults, so existing worker configuration
+continues to behave as before. Provider account entitlement still determines
+whether a selected model is available.
+
 For a supervisor-facing structured interface, run:
 
 ```bash

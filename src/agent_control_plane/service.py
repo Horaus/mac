@@ -4,27 +4,43 @@ import subprocess
 import uuid
 import os
 import signal
+import json
 from pathlib import Path
 
 from .providers import ManagedRun, ProviderAdapter, WorkerResult
+from .profiles import ExecutionProfile, profile_from
+
+def _inject_context(prompt: str, context: str, profile: ExecutionProfile) -> str:
+    if profile.context.allowed_paths:
+        context += "\nALLOWED PATHS:\n" + "\n".join(profile.context.allowed_paths)
+    if profile.context.max_input_tokens is not None:
+        budget_chars = profile.context.max_input_tokens * 4
+        context = context[:budget_chars]
+    return prompt + ("\n\n" + context if context else "")
 from .store import Store
 
 
 def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdapter,
-               prompt: str, cwd: str | Path, base_commit: str | None = None) -> WorkerResult:
+               prompt: str, cwd: str | Path, base_commit: str | None = None,
+               profile: ExecutionProfile | None = None) -> WorkerResult:
     """Run one provider worker and record a reviewable result; never integrate it."""
     task = store.task(task_id)
     if task is None:
         raise ValueError(f"unknown task: {task_id}")
     store.add_worker(worker_id, adapter.name, worktree=str(cwd))
+    profile = profile or ExecutionProfile()
+    adapter.validate_profile(profile)
     store.claim_task(task_id, worker_id, base_commit)
     store.capture_declared_resources(task_id)
-    knowledge = store.knowledge_context()
-    if knowledge: prompt = prompt + "\n\n" + knowledge
+    prompt = _inject_context(prompt, store.knowledge_context(profile.context.knowledge_mode), profile)
     run_id = f"run-{uuid.uuid4().hex}"
-    store.start_run(run_id, task_id, worker_id, adapter.name)
+    store.start_run(run_id, task_id, worker_id, adapter.name, profile=profile)
     try:
-        result = adapter.run(prompt, Path(cwd))
+        try:
+            result = adapter.run(prompt, Path(cwd), profile)
+        except TypeError as error:
+            if "positional argument" not in str(error): raise
+            result = adapter.run(prompt, Path(cwd))
     except Exception:
         store.finish_run(run_id, "FAILED", 1, "provider raised an exception")
         store.set_worker_status(worker_id, "FAILED")
@@ -33,7 +49,7 @@ def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdap
         raise
     status = "REVIEW" if result.exit_code == 0 else "FAILED"
     store.set_worker_status(worker_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.session_id)
-    store.finish_run(run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id)
+    store.finish_run(run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id, result.failure_class, result.usage)
     store.set_task_status(task_id, status)
     store.release_task_leases(task_id)
     store.add_message("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER",
@@ -65,20 +81,21 @@ def validate(store: Store, task_id: str, command: str, cwd: str | Path, timeout:
 
 
 def start_managed_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdapter,
-                         prompt: str, cwd: str | Path) -> ManagedRun:
+                         prompt: str, cwd: str | Path, profile: ExecutionProfile | None = None) -> ManagedRun:
     task = store.task(task_id)
     if task is None: raise ValueError(f"unknown task: {task_id}")
+    profile = profile or ExecutionProfile()
+    adapter.validate_profile(profile)
     store.claim_task(task_id, worker_id)
-    knowledge = store.knowledge_context()
-    if knowledge: prompt = prompt + "\n\n" + knowledge
+    prompt = _inject_context(prompt, store.knowledge_context(profile.context.knowledge_mode), profile)
     try:
-        run = adapter.start(prompt, Path(cwd))
+        run = adapter.start(prompt, Path(cwd), profile)
     except Exception:
         store.set_task_status(task_id, "FAILED")
         raise
     store.add_worker(worker_id, adapter.name, run.session_id, str(cwd))
     run.run_id = f"run-{uuid.uuid4().hex}"
-    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id)
+    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id, profile)
     return run
 
 
@@ -86,7 +103,7 @@ def finish_managed_worker(store: Store, task_id: str, worker_id: str, run: Manag
     result = run.wait()
     status = "REVIEW" if result.exit_code == 0 else "FAILED"
     store.set_worker_status(worker_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.session_id)
-    store.finish_run(run.run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id)
+    store.finish_run(run.run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id, result.failure_class, result.usage)
     store.set_task_status(task_id, status)
     store.release_task_leases(task_id)
     store.add_message("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER",
@@ -120,12 +137,33 @@ def cancel_managed_worker(store: Store, task_id: str, worker_id: str, run: Manag
 
 
 def resume_managed_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdapter,
-                          session_id: str, prompt: str, cwd: str | Path) -> ManagedRun:
+                          session_id: str, prompt: str, cwd: str | Path, profile: ExecutionProfile | None = None) -> ManagedRun:
     task = store.task(task_id)
     if task is None: raise ValueError(f"unknown task: {task_id}")
-    run = adapter.resume(session_id, prompt, Path(cwd))
+    previous = store.latest_run(task_id, worker_id)
+    snapshot = profile_from(json.loads(previous["profile_json"])) if previous and previous["profile_json"] else ExecutionProfile()
+    from_snapshot = profile is None
+    if profile is None:
+        profile = snapshot
+    elif profile.snapshot() != snapshot.snapshot():
+        # Unsupported resume fields are valid historical facts, but not valid
+        # reconfiguration requests. A supervisor must explicitly request a
+        # supported, changed profile instead of silently changing a session.
+        if profile.profile != snapshot.profile or profile.sandbox != snapshot.sandbox:
+            raise ValueError("resume override changes unsupported Codex session settings")
+    adapter.validate_profile(profile)
+    resume_snapshot = from_snapshot or profile.snapshot() == snapshot.snapshot()
+    try:
+        run = adapter.resume(session_id, prompt, Path(cwd), profile, resume_snapshot=resume_snapshot)
+    except TypeError as error:
+        if "positional argument" not in str(error) and "unexpected keyword" not in str(error): raise
+        try:
+            run = adapter.resume(session_id, prompt, Path(cwd), profile)
+        except TypeError as legacy_error:
+            if "positional argument" not in str(legacy_error): raise
+            run = adapter.resume(session_id, prompt, Path(cwd))
     run.run_id = f"run-{uuid.uuid4().hex}"
-    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id)
+    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id, profile)
     store.set_worker_status(worker_id, "RUNNING", run.session_id)
     store.set_task_status(task_id, "RUNNING")
     return run

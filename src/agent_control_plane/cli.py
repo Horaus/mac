@@ -14,6 +14,7 @@ from .providers import provider
 from .service import run_worker, validate
 from .store import Store
 from .setup import connect_codex, doctor, run_setup, show_config, show_mcp_config
+from .profiles import resolve_profile
 from . import __version__
 
 def _release_info(root: Path) -> tuple[str, str]:
@@ -226,6 +227,7 @@ def main(argv=None) -> int:
     tasks = sub.add_parser("task").add_subparsers(dest="task_command", required=True)
     create = tasks.add_parser("create")
     create.add_argument("--id", required=True); create.add_argument("--title", required=True)
+    create.add_argument("--model", default=None); create.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default=None)
     create.add_argument("--provider", default=None); create.add_argument("--depends-on", action="append", default=[])
     retry = tasks.add_parser("retry")
     retry.add_argument("--id", required=True); retry.add_argument("--worker-id", default=None)
@@ -247,8 +249,9 @@ def main(argv=None) -> int:
     run.add_argument("--task-id", required=True); run.add_argument("--worker-id", required=True)
     run.add_argument("--cwd", default=None); run.add_argument("--prompt", required=True)
     run.add_argument("--provider", choices=["codex", "gemini"], default=None); run.add_argument("--conversation-id", default=None)
+    run.add_argument("--model", default=None); run.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default=None)
     check = sub.add_parser("validate")
-    check.add_argument("--task-id", required=True); check.add_argument("--cwd", default=None); check.add_argument("--timeout", type=float, default=300); check.add_argument("command", nargs="+")
+    check.add_argument("--task-id", required=True); check.add_argument("--cwd", default=None); check.add_argument("--timeout", type=float, default=300); check.add_argument("validation_command", nargs=argparse.REMAINDER)
     inbox = sub.add_parser("inbox")
     history = sub.add_parser("history").add_subparsers(dest="history_command", required=True)
     history_add = history.add_parser("add")
@@ -283,7 +286,8 @@ def main(argv=None) -> int:
                 print(f"Update failed: {error.stderr or error}", file=sys.stderr)
                 return 1
         elif args.command == "task" and args.task_command == "create":
-            store.add_task(args.id, args.title, args.provider, args.depends_on); print(args.id)
+            execution = {k: v for k, v in {"model": args.model, "reasoning_effort": args.reasoning_effort}.items() if v is not None}
+            store.add_task(args.id, args.title, args.provider, args.depends_on, execution); print(args.id)
         elif args.command == "task" and args.task_command == "retry":
             store.retry_task(args.id, args.worker_id); print(f"retrying {args.id}")
         elif args.command == "task" and args.task_command == "cancel":
@@ -302,15 +306,23 @@ def main(argv=None) -> int:
             cwd = Path(args.cwd or args.project)
             task_provider = args.provider or store.task(args.task_id)["provider"] or "codex"
             prompt = args.prompt
+            config_path = Path(args.project) / ".agent-control-plane" / "config.json"
+            config = json.loads(config_path.read_text()) if config_path.exists() else {}
+            worker_config = next((w for w in config.get("workers", []) if w.get("id") == args.worker_id), {})
             if args.conversation_id:
-                context = list(reversed(store.history(args.conversation_id, 20)))
+                history_limit = int(worker_config.get("execution", {}).get("context", {}).get("history_limit", 6))
+                context = list(reversed(store.history(args.conversation_id, history_limit)))
                 prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
-            result = run_worker(store, args.task_id, args.worker_id, provider(task_provider), prompt, cwd)
+            override = {k: v for k, v in {"model": args.model, "reasoning_effort": args.reasoning_effort}.items() if v is not None}
+            task = store.task(args.task_id)
+            task_override = json.loads(task["execution_json"]) if task and task["execution_json"] else {}
+            profile = resolve_profile(config.get("execution", {}), worker_config, task_override, override)
+            result = run_worker(store, args.task_id, args.worker_id, provider(task_provider), prompt, cwd, profile=profile)
             print(json.dumps({"exit_code": result.exit_code, "output": result.output, "status": store.task(args.task_id)["status"]}))
             return result.exit_code
         elif args.command == "validate":
             cwd = Path(args.cwd or args.project)
-            exit_code = validate(store, args.task_id, " ".join(args.command), cwd, args.timeout)
+            exit_code = validate(store, args.task_id, " ".join(args.validation_command), cwd, args.timeout)
             print(json.dumps({"exit_code": exit_code}))
             return exit_code
         elif args.command == "inbox":

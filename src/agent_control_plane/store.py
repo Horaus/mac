@@ -13,7 +13,7 @@ SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL,
-  provider TEXT, worker_id TEXT, base_commit TEXT, resource_versions TEXT NOT NULL DEFAULT '{}',
+  provider TEXT, worker_id TEXT, base_commit TEXT, execution_json TEXT NOT NULL DEFAULT '{}', resource_versions TEXT NOT NULL DEFAULT '{}',
   created_at REAL NOT NULL, updated_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS dependencies (
@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS workers (
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   worker_id TEXT NOT NULL, provider TEXT NOT NULL, session_id TEXT,
-  status TEXT NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '', profile_json TEXT NOT NULL DEFAULT '{}',
+  input_tokens INTEGER, cached_input_tokens INTEGER, output_tokens INTEGER, failure_class TEXT,
   started_at REAL NOT NULL, finished_at REAL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -102,11 +103,11 @@ class Store:
     TASK_TRANSITIONS = {
         "READY": {"RUNNING", "WAITING_RESOURCE", "WAITING_DEPENDENCY", "WAITING_DECISION", "PAUSED", "FAILED", "DISPUTED", "STALE"},
         "RUNNING": {"REVIEW", "FAILED", "PAUSED", "DISPUTED", "STALE"},
-        "REVIEW": {"ACCEPTED", "REPAIR", "DISPUTED", "STALE"},
+        "REVIEW": {"ACCEPTED", "REPAIR", "DISPUTED", "STALE", "FAILED"},
         "ACCEPTED": {"DONE"}, "DONE": set(), "FAILED": {"READY", "REPAIR", "STALE"},
-        "PAUSED": {"READY", "RUNNING", "FAILED", "STALE"}, "WAITING_RESOURCE": {"READY", "RUNNING", "PAUSED", "STALE"},
-        "WAITING_DEPENDENCY": {"READY", "RUNNING", "PAUSED", "STALE"}, "WAITING_DECISION": {"READY", "REPAIR", "PAUSED", "STALE"},
-        "STALE": {"READY", "REPAIR", "DISPUTED", "PAUSED"}, "DISPUTED": {"REPAIR", "WAITING_DECISION", "PAUSED", "STALE"},
+        "PAUSED": {"READY", "RUNNING", "FAILED", "STALE"}, "WAITING_RESOURCE": {"READY", "RUNNING", "PAUSED", "STALE", "FAILED"},
+        "WAITING_DEPENDENCY": {"READY", "RUNNING", "PAUSED", "STALE", "FAILED"}, "WAITING_DECISION": {"READY", "REPAIR", "PAUSED", "STALE", "FAILED"},
+        "STALE": {"READY", "REPAIR", "DISPUTED", "PAUSED", "FAILED"}, "DISPUTED": {"REPAIR", "WAITING_DECISION", "PAUSED", "STALE", "FAILED"},
         "REPAIR": {"READY", "RUNNING", "PAUSED", "FAILED", "STALE"},
     }
 
@@ -119,6 +120,15 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        # Additive migrations keep existing SQLite state usable.
+        task_columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
+        if "execution_json" not in task_columns:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(runs)")}
+        for name, definition in (("profile_json", "TEXT NOT NULL DEFAULT '{}'"), ("input_tokens", "INTEGER"),
+                                 ("cached_input_tokens", "INTEGER"), ("output_tokens", "INTEGER"), ("failure_class", "TEXT")):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
         self.db.commit()
 
     def close(self) -> None:
@@ -231,17 +241,20 @@ class Store:
         worker = self.db.execute("SELECT 1 FROM knowledge_ack WHERE digest=? AND actor='worker' AND worker_id=?", (digest, worker_id)).fetchone()
         return boss is not None and worker is not None
 
-    def knowledge_context(self) -> str:
+    def knowledge_context(self, mode: str = "summary") -> str:
+        if mode == "none": return ""
         row = self.db.execute("SELECT path,digest FROM knowledge ORDER BY id DESC LIMIT 1").fetchone()
         if row is None: return ""
         source = Path(row["path"])
         if not source.is_file(): return ""
-        return f"KNOWLEDGE DIGEST: {row['digest']}\nKNOWLEDGE CONTENT:\n{source.read_text()}"
+        content = source.read_text()
+        if mode == "summary": content = "\n".join(line for line in content.splitlines() if line.strip())[:4000]
+        return f"KNOWLEDGE DIGEST: {row['digest']}\nKNOWLEDGE CONTENT:\n{content}"
 
     def _now(self) -> float:
         return time.time()
 
-    def add_task(self, task_id: str, title: str, provider: str | None = None, depends_on=()) -> None:
+    def add_task(self, task_id: str, title: str, provider: str | None = None, depends_on=(), execution=None) -> None:
         depends_on = list(depends_on)
         if not task_id or not title:
             raise ValueError("task id and title are required")
@@ -253,8 +266,8 @@ class Store:
         if missing:
             raise ValueError(f"unknown task dependencies: {', '.join(missing)}")
         now = self._now()
-        self.db.execute("INSERT INTO tasks(id,title,status,provider,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                        (task_id, title, "READY", provider, now, now))
+        self.db.execute("INSERT INTO tasks(id,title,status,provider,execution_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                        (task_id, title, "READY", provider, json.dumps(execution or {}, sort_keys=True), now, now))
         for dep in depends_on:
             self.db.execute("INSERT INTO dependencies(task_id,depends_on) VALUES(?,?)", (task_id, dep))
         self.db.commit()
@@ -493,15 +506,23 @@ class Store:
                         (worker_id, base_commit, self._now(), task_id))
         self.db.commit()
 
-    def start_run(self, run_id: str, task_id: str, worker_id: str, provider: str, session_id: str | None = None) -> None:
-        self.db.execute("INSERT INTO runs(id,task_id,worker_id,provider,session_id,status,started_at) VALUES(?,?,?,?,?,?,?)",
-                        (run_id, task_id, worker_id, provider, session_id, "RUNNING", self._now()))
+    def start_run(self, run_id: str, task_id: str, worker_id: str, provider: str, session_id: str | None = None, profile=None) -> None:
+        profile_json = json.dumps(profile.snapshot() if hasattr(profile, "snapshot") else (profile or {}), sort_keys=True)
+        self.db.execute("INSERT INTO runs(id,task_id,worker_id,provider,session_id,status,profile_json,started_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (run_id, task_id, worker_id, provider, session_id, "RUNNING", profile_json, self._now()))
         self.db.commit()
 
-    def finish_run(self, run_id: str, status: str, exit_code: int, output: str, session_id: str | None = None) -> None:
-        self.db.execute("UPDATE runs SET status=?,exit_code=?,output=?,session_id=COALESCE(?,session_id),finished_at=? WHERE id=?",
-                        (status, exit_code, output, session_id, self._now(), run_id))
+    def finish_run(self, run_id: str, status: str, exit_code: int, output: str, session_id: str | None = None,
+                   failure_class: str | None = None, usage: dict | None = None) -> None:
+        self.db.execute("UPDATE runs SET status=?,exit_code=?,output=?,session_id=COALESCE(?,session_id),failure_class=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,finished_at=? WHERE id=?",
+                        (status, exit_code, output, session_id, failure_class, (usage or {}).get("input_tokens"),
+                         (usage or {}).get("cached_input_tokens"), (usage or {}).get("output_tokens"), self._now(), run_id))
         self.db.commit()
+
+    def latest_run(self, task_id: str, worker_id: str | None = None):
+        if worker_id is None:
+            return self.db.execute("SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task_id,)).fetchone()
+        return self.db.execute("SELECT * FROM runs WHERE task_id=? AND worker_id=? ORDER BY started_at DESC LIMIT 1", (task_id, worker_id)).fetchone()
 
     def reconcile(self) -> list[str]:
         """Recover externally-dead managed processes without trusting stale locks."""

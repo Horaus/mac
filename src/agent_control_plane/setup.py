@@ -11,6 +11,7 @@ _TTY = __import__("sys").stdout.isatty() and __import__("os").environ.get("ACP_N
 _CYAN = "\033[36m" if _TTY else ""; _GREEN = "\033[32m" if _TTY else ""; _YELLOW = "\033[33m" if _TTY else ""; _DIM = "\033[2m" if _TTY else ""; _RESET = "\033[0m" if _TTY else ""
 from pathlib import Path
 from .store import Store
+from .profiles import profile_from
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -86,8 +87,8 @@ def _fullscreen_setup(project: Path, found):
         if curses.has_colors():
             curses.start_color(); curses.use_default_colors()
         translations = {
-            "en": {"title":" AGENT CONTROL PLANE / WORKSPACE SETUP ","tabs":["Providers","Workers","Language","Theme","Finish"],"provider":"Select one or more CLIs (Space toggles)","provider_note":"Codex and Gemini can run together; each worker has its own provider.","workers_title":"Workers · n count  a add  e edit  p provider  d delete","workers_note":"Master controls name, provider, role, and scope.","language":"Interface language","language_prompt":"Select the language used throughout MAC:","choose":"↑↓ move · Enter select","theme":"Color theme","theme_prompt":"Select the terminal appearance:","dark":"Dark","light":"Light","finish":"Review and save","providers":"Providers","workers":"Workers","footer":"↑↓ select   ←→/Tab change tab   q review & exit","exit":"Exit — save changes? [y] Save  [n] Don't save  [c] Cancel"},
-            "vi": {"title":" AGENT CONTROL PLANE / THIẾT LẬP WORKSPACE ","tabs":["Provider","Worker","Ngôn ngữ","Giao diện","Hoàn tất"],"provider":"Chọn một hoặc nhiều CLI (Space bật/tắt)","provider_note":"Có thể dùng Codex và Gemini cùng lúc; mỗi worker chọn provider riêng.","workers_title":"Worker · n số lượng  a thêm  e sửa  p provider  d xóa","workers_note":"Master quản lý tên, provider, vai trò và phạm vi.","language":"Ngôn ngữ giao diện","language_prompt":"Chọn ngôn ngữ dùng trong toàn bộ MAC:","choose":"↑↓ di chuyển · Enter chọn","theme":"Màu giao diện","theme_prompt":"Chọn giao diện terminal:","dark":"Tối","light":"Sáng","finish":"Kiểm tra và lưu","providers":"Provider","workers":"Worker","footer":"↑↓ chọn   ←→/Tab đổi tab   q xem lại & thoát","exit":"Thoát, bạn có muốn lưu không? [y] Lưu  [n] Không lưu  [c] Hủy"},
+            "en": {"title":" AGENT CONTROL PLANE / WORKSPACE SETUP ","tabs":["Providers","Workers","Language","Theme","Finish"],"provider":"Select one or more CLIs (Space toggles)","provider_note":"Codex and Gemini can run together; each worker has its own provider.","workers_title":"Workers · n count  a add  e edit  x execution profile  p provider  d delete","workers_note":"Master controls name, provider, role, scope. Press x to edit and view the execution profile.","language":"Interface language","language_prompt":"Select the language used throughout MAC:","choose":"↑↓ move · Enter select","theme":"Color theme","theme_prompt":"Select the terminal appearance:","dark":"Dark","light":"Light","finish":"Review and save","providers":"Providers","workers":"Workers","footer":"↑↓ select   ←→/Tab change tab   q review & exit","exit":"Exit — save changes? [y] Save  [n] Don't save  [c] Cancel"},
+            "vi": {"title":" AGENT CONTROL PLANE / THIẾT LẬP WORKSPACE ","tabs":["Provider","Worker","Ngôn ngữ","Giao diện","Hoàn tất"],"provider":"Chọn một hoặc nhiều CLI (Space bật/tắt)","provider_note":"Có thể dùng Codex và Gemini cùng lúc; mỗi worker chọn provider riêng.","workers_title":"Worker · n số lượng  a thêm  e sửa  x profile thực thi  p provider  d xóa","workers_note":"Master quản lý tên, provider, vai trò, phạm vi. Nhấn x để sửa/xem profile thực thi.","language":"Ngôn ngữ giao diện","language_prompt":"Chọn ngôn ngữ dùng trong toàn bộ MAC:","choose":"↑↓ di chuyển · Enter chọn","theme":"Màu giao diện","theme_prompt":"Chọn giao diện terminal:","dark":"Tối","light":"Sáng","finish":"Kiểm tra và lưu","providers":"Provider","workers":"Worker","footer":"↑↓ chọn   ←→/Tab đổi tab   q xem lại & thoát","exit":"Thoát, bạn có muốn lưu không? [y] Lưu  [n] Không lưu  [c] Hủy"},
             "zh": {"title":" AGENT CONTROL PLANE / 工作区设置 ","tabs":["提供商","工作者","语言","主题","完成"],"provider":"选择一个或多个 CLI（Space 切换）","provider_note":"Codex 与 Gemini 可同时使用；每个工作者可选择提供商。","workers_title":"工作者 · n 数量  a 添加  e 编辑  p 提供商  d 删除","workers_note":"Master 管理名称、提供商、角色和范围。","language":"界面语言","language_prompt":"选择整个 MAC 使用的语言：","choose":"↑↓ 移动 · Enter 选择","theme":"颜色主题","theme_prompt":"选择终端外观：","dark":"深色","light":"浅色","finish":"检查并保存","providers":"提供商","workers":"工作者","footer":"↑↓ 选择   ←→/Tab 切换   q 检查并退出","exit":"退出并保存更改？[y] 保存 [n] 不保存 [c] 取消"},
             "ja": {"title":" AGENT CONTROL PLANE / ワークスペース設定 ","tabs":["プロバイダー","ワーカー","言語","テーマ","完了"],"provider":"CLI を選択（Space で切替）","provider_note":"Codex と Gemini を同時に使用でき、ワーカーごとに選択できます。","workers_title":"ワーカー · n 数  a 追加  e 編集  p 提供元  d 削除","workers_note":"Master が名前、提供元、役割、範囲を管理します。","language":"表示言語","language_prompt":"MAC 全体で使用する言語を選択：","choose":"↑↓ 移動 · Enter 選択","theme":"カラーテーマ","theme_prompt":"ターミナルの外観を選択：","dark":"ダーク","light":"ライト","finish":"確認して保存","providers":"プロバイダー","workers":"ワーカー","footer":"↑↓ 選択   ←→/Tab タブ移動   q 確認して終了","exit":"終了して保存しますか？[y] 保存 [n] 保存しない [c] キャンセル"},
             "ko": {"title":" AGENT CONTROL PLANE / 작업 공간 설정 ","tabs":["제공자","워커","언어","테마","완료"],"provider":"CLI 선택 (Space 전환)","provider_note":"Codex와 Gemini를 함께 사용하고 워커별로 지정할 수 있습니다.","workers_title":"워커 · n 수  a 추가  e 편집  p 제공자  d 삭제","workers_note":"Master가 이름, 제공자, 역할, 범위를 관리합니다.","language":"인터페이스 언어","language_prompt":"MAC 전체에서 사용할 언어 선택:","choose":"↑↓ 이동 · Enter 선택","theme":"색상 테마","theme_prompt":"터미널 모양 선택:","dark":"다크","light":"라이트","finish":"검토 및 저장","providers":"제공자","workers":"워커","footer":"↑↓ 선택   ←→/Tab 탭 이동   q 검토 후 종료","exit":"종료하고 저장할까요? [y] 저장 [n] 저장 안 함 [c] 취소"},
@@ -95,6 +96,10 @@ def _fullscreen_setup(project: Path, found):
             "es": {"title":" AGENT CONTROL PLANE / CONFIGURACIÓN ","tabs":["Proveedores","Workers","Idioma","Tema","Finalizar"],"provider":"Seleccione uno o más CLI (Space alterna)","provider_note":"Codex y Gemini pueden usarse juntos, uno por worker.","workers_title":"Workers · n cantidad  a añadir  e editar  p proveedor  d borrar","workers_note":"El Master gestiona nombre, proveedor, rol y alcance.","language":"Idioma de la interfaz","language_prompt":"Seleccione el idioma utilizado en MAC:","choose":"↑↓ mover · Enter seleccionar","theme":"Tema de color","theme_prompt":"Seleccione la apariencia del terminal:","dark":"Oscuro","light":"Claro","finish":"Revisar y guardar","providers":"Proveedores","workers":"Workers","footer":"↑↓ elegir   ←→/Tab cambiar   q revisar y salir","exit":"¿Salir y guardar? [y] Sí [n] No [c] Cancelar"},
             "de": {"title":" AGENT CONTROL PLANE / EINRICHTUNG ","tabs":["Provider","Worker","Sprache","Design","Fertig"],"provider":"CLI auswählen (Space umschalten)","provider_note":"Codex und Gemini können gemeinsam pro Worker verwendet werden.","workers_title":"Worker · n Anzahl  a hinzufügen  e ändern  p Provider  d löschen","workers_note":"Der Master verwaltet Name, Provider, Rolle und Bereich.","language":"Oberflächensprache","language_prompt":"Sprache für MAC auswählen:","choose":"↑↓ bewegen · Enter wählen","theme":"Farbschema","theme_prompt":"Terminal-Darstellung auswählen:","dark":"Dunkel","light":"Hell","finish":"Prüfen und speichern","providers":"Provider","workers":"Worker","footer":"↑↓ wählen   ←→/Tab wechseln   q prüfen und beenden","exit":"Beenden und speichern? [y] Ja [n] Nein [c] Abbrechen"},
         }
+        for language_text in translations.values():
+            if " x " not in language_text["workers_title"]:
+                language_text["workers_title"] = language_text["workers_title"].replace(" p ", " x execution profile  p ")
+            language_text["workers_note"] += " / x: execution profile"
         control_text = {
             "en": {"control":"Control","control_prompt":"Choose how workers are distributed among Masters:","lock":"Lock — fixed worker count; shortages remain PENDING and no extra workers are allocated","flexible":"Flexible — Masters adjust worker counts dynamically through MCP","control_note":"Flexible does not save chat history; Lock saves it by master_id + conversation_id.","policy":"Policy","role_label":"role","scope_label":"scope"},
             "vi": {"control":"Điều phối","control_prompt":"Chọn cách phân phối worker giữa các Master:","lock":"Lock — số worker cố định; thiếu thì báo PENDING và từ chối cấp thêm","flexible":"Flexible — Master điều chỉnh số lượng worker tức thời qua MCP","control_note":"Flexible không lưu lịch sử chat; Lock lưu theo master_id + conversation_id.","policy":"Chính sách","role_label":"vai trò","scope_label":"phạm vi"},
@@ -137,6 +142,7 @@ def _fullscreen_setup(project: Path, found):
                 item["provider"] = default_provider
             item.setdefault("role", "general")
             item.setdefault("scope", "project")
+            item["execution"] = profile_from(item.get("execution")).snapshot()
             normalized.append(item)
         workers = normalized
         languages = [("vi", "Tiếng Việt"), ("en", "English"), ("zh", "中文"), ("ja", "日本語"), ("ko", "한국어"), ("fr", "Français"), ("es", "Español"), ("de", "Deutsch")]
@@ -180,7 +186,9 @@ def _fullscreen_setup(project: Path, found):
             elif page == 1:
                 put(5, 4, text["workers_title"], curses.A_BOLD)
                 for i, worker in enumerate(workers):
-                    line = f"{worker['id']:<18} {worker['provider']:<8} {text['role_label']}={worker['role']:<18} {text['scope_label']}={worker['scope']}"
+                    execution = worker.get("execution", {})
+                    selected = f"model={execution.get('model') or 'default'} sandbox={execution.get('sandbox') or 'provider default'} effort={execution.get('reasoning_effort') or 'default'}"
+                    line = f"{worker['id']:<18} {worker['provider']:<8} {text['role_label']}={worker['role']:<18} {text['scope_label']}={worker['scope']}  [{selected}]"
                     put(7+i, 4, line, active_attr if i == cursor else 0)
                 put(9+len(workers), 4, text["workers_note"], curses.A_DIM)
                 if message:
@@ -270,6 +278,19 @@ def _fullscreen_setup(project: Path, found):
                     message = "Tên worker đã tồn tại; thay đổi đã hủy." if language == "vi" else "Worker name already exists; edit canceled."
                     continue
                 x["id"] = new_id; x["provider"] = ask(stdscr, labels[1], x["provider"]); x["role"] = ask(stdscr, labels[2], x["role"]); x["scope"] = ask(stdscr, labels[3], x["scope"])
+            elif page == 1 and workers and key == ord('x'):
+                x = workers[cursor]; current = x.get("execution", {})
+                execution = dict(current)
+                execution["model"] = ask(stdscr, "Model (blank = provider default)", execution.get("model") or "") or None
+                execution["profile"] = ask(stdscr, "Codex profile (blank = none)", execution.get("profile") or "") or None
+                effort = ask(stdscr, "Reasoning effort (low/medium/high)", execution.get("reasoning_effort") or "medium")
+                execution["reasoning_effort"] = effort or None
+                sandbox = ask(stdscr, "Sandbox (blank = provider default; read-only/workspace-write/danger-full-access)", execution.get("sandbox") or "")
+                execution["sandbox"] = sandbox or None
+                try:
+                    x["execution"] = profile_from(execution).snapshot(); message = "Execution profile updated."
+                except ValueError as error:
+                    message = f"Invalid execution profile: {error}"
             elif page == 1 and workers and key == ord('p'):
                 if not providers or not enabled:
                     message = "Bật ít nhất một CLI trước khi đổi provider." if language == "vi" else "Enable at least one CLI before changing a provider."

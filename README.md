@@ -21,6 +21,11 @@ Sau khi cài đặt, mở MAC để thiết lập, sử dụng lệnh:
 
     mac
 
+Trong tab **Worker**, chọn từng worker và nhấn `x` để đặt model, Codex
+profile, reasoning effort và sandbox riêng. Để trống một mục nếu muốn kế thừa
+cấu hình mặc định của provider. Model chỉ chạy được khi tài khoản/provider hiện
+tại có quyền sử dụng model đó.
+
 ##### Hệ điều hành được hỗ trợ
 
 - **Windows 10 và Windows 11:** dùng PowerShell và <code>bootstrap.ps1</code>.
@@ -175,6 +180,11 @@ Run the following commands in **Terminal**:
 After installation, open MAC to configure it with:
 
     mac
+
+In the **Workers** tab, select a worker and press `x` to configure its model,
+Codex profile, reasoning effort, and sandbox. Leave a field blank to inherit
+the provider default. A configured model can run only when the current account
+and provider are entitled to use it.
 
 ##### Supported operating systems
 

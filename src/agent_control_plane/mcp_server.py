@@ -11,6 +11,7 @@ from .service import (arbitrate_conflict, cancel_managed_worker, finish_managed_
                        pause_managed_worker, resume_live_worker, run_worker,
                        start_managed_worker, validate)
 from .orchestrator import Supervisor
+from .profiles import resolve_profile
 
 
 TOOL_DEFS = {
@@ -33,14 +34,14 @@ TOOL_DEFS = {
     "bump_resource": {"resource": {"type": "string"}},
     "accept_integration": {"task_id": {"type": "string"}, "worktree": {"type": "string"}, "commit_message": {"type": "string"}, "validation": {"type": "array", "items": {"type": "string"}}},
     "arbitrate_conflict": {"task_id": {"type": "string"}, "decision_id": {"type": "string"}, "provider": {"type": "string"}, "evidence": {"type": "string"}, "cwd": {"type": "string"}},
-    "create_task": {"id": {"type": "string"}, "title": {"type": "string"}, "provider": {"type": "string"}, "depends_on": {"type": "array", "items": {"type": "string"}}},
+    "create_task": {"id": {"type": "string"}, "title": {"type": "string"}, "provider": {"type": "string"}, "depends_on": {"type": "array", "items": {"type": "string"}}, "execution": {"type": "object"}},
     "create_resource": {"name": {"type": "string"}, "kind": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}},
     "send_message": {"type": {"type": "string"}, "payload": {"type": "object"}, "task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "accept_task": {"task_id": {"type": "string"}}, "pause_task": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
     "resume_task": {"task_id": {"type": "string"}}, "cancel_task": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
     "resolve_conflict": {"decision_id": {"type": "string"}, "task_id": {"type": "string"}, "decision": {"type": "string"}, "reason": {"type": "string"}},
-    "run_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}},
-    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}},
+    "run_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "execution": {"type": "object"}},
+    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "execution": {"type": "object"}},
     "pause_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "resume_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "wait_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
@@ -59,12 +60,35 @@ def _history_enabled(store: Store) -> bool:
     except (OSError, json.JSONDecodeError): return True
 
 
+def _resolved_profile(store: Store, task_id: str, worker_id: str, dispatch: dict):
+    config_path = store.path.parent / "config.json"
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    worker = next((item for item in config.get("workers", []) if item.get("id") == worker_id), {})
+    task = store.task(task_id)
+    task_override = json.loads(task["execution_json"]) if task and task["execution_json"] else {}
+    return resolve_profile(config.get("execution", {}), worker, task_override, dispatch.get("execution", {}))
+
+
+def _resolved_provider(store: Store, task_id: str, worker_id: str, dispatch: dict) -> str:
+    config_path = store.path.parent / "config.json"
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    worker = next((item for item in config.get("workers", []) if item.get("id") == worker_id), {})
+    task = store.task(task_id)
+    # Explicit dispatch > task > worker > project/provider default.
+    return (dispatch.get("provider") or (task["provider"] if task and task["provider"] else None)
+            or worker.get("provider") or (config.get("providers") or ["codex"])[0])
+
+
+def _history_limit(profile) -> int:
+    return profile.context.history_limit
+
+
 def dispatch(store: Store, method: str, args: dict) -> object:
     if method == "ping":
         return {}
     if method == "initialize":
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.1.0"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.2.0"},
                 "instructions": "You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
@@ -102,20 +126,22 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         store.acknowledge_knowledge(a["actor"], a.get("worker_id")); return {"content": [{"type": "text", "text": "acknowledged"}]}
     if name == "run_worker":
         prompt = a["prompt"]
+        profile = _resolved_profile(store, a["task_id"], a["worker_id"], a)
         if a.get("conversation_id") and _history_enabled(store):
-            context = list(reversed(store.history(a["conversation_id"], 20)))
+            context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
-        result = run_worker(store, a["task_id"], a["worker_id"], provider(a.get("provider", "codex")), prompt, a["cwd"])
+        result = run_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile)
         return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
     if name == "start_worker":
         key = (a["task_id"], a["worker_id"])
         if key in ACTIVE_RUNS:
             raise ValueError("managed worker is already active")
         prompt = a["prompt"]
+        profile = _resolved_profile(store, a["task_id"], a["worker_id"], a)
         if a.get("conversation_id") and _history_enabled(store):
-            context = list(reversed(store.history(a["conversation_id"], 20)))
+            context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
-        run = start_managed_worker(store, a["task_id"], a["worker_id"], provider(a.get("provider", "codex")), prompt, a["cwd"])
+        run = start_managed_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile)
         ACTIVE_RUNS[key] = run
         return {"content": [{"type": "text", "text": json.dumps({"session_id": run.session_id, "status": "RUNNING"})}]}
     if name == "pause_worker":
@@ -157,7 +183,7 @@ def dispatch(store: Store, method: str, args: dict) -> object:
     if name == "bump_resource":
         version = store.bump_resource(a["resource"]); return {"content": [{"type": "text", "text": json.dumps({"version": version})}]}
     if name == "create_task":
-        store.add_task(a["id"], a["title"], a.get("provider"), a.get("depends_on", [])); return {"content": [{"type": "text", "text": f"created {a['id']}"}]}
+        store.add_task(a["id"], a["title"], a.get("provider"), a.get("depends_on", []), a.get("execution", {})); return {"content": [{"type": "text", "text": f"created {a['id']}"}]}
     if name == "create_resource":
         store.add_resource(a["name"], a["kind"], a.get("paths", [])); return {"content": [{"type": "text", "text": f"created {a['name']}"}]}
     if name == "send_message":
