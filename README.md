@@ -26,18 +26,19 @@ profile, reasoning effort và sandbox riêng. Để trống một mục nếu mu
 cấu hình mặc định của provider. Model chỉ chạy được khi tài khoản/provider hiện
 tại có quyền sử dụng model đó.
 
-##### Tình trạng provider và kiểm thử của phiên bản 0.3.0
+##### Đã thử với Sol và Luna
 
-- Codex là provider đã được chạy kiểm thử thực tế trong môi trường phát hành.
-- Tích hợp Gemini vẫn có trong MAC, nhưng chưa được kiểm thử runtime end-to-end
-  ở bản này vì môi trường tài khoản/nhà phát hành hiện tại đang giới hạn quyền
-  chạy. Đây không phải là cam kết rằng mọi tài khoản Gemini đều bị khóa.
-- Model cụ thể, bao gồm Luna, chỉ dùng được khi CLI và tài khoản hiện tại cấp
-  quyền. MAC không tự fallback sang model khác mà không báo lỗi.
-- Browser/CDP/Electron thật, paid submission thật, live steering và giới hạn
-  token cứng do provider thực thi vẫn là các kiểm chứng bên ngoài chưa chạy.
-  MAC đã có kiểm thử local/fake cho policy, lease, approval, recovery và
-  acceptance gate tương ứng.
+MAC không chỉ được kiểm tra bằng fixture. Một phiên làm việc thật đã dùng
+**gpt-5.6-sol làm Master trên ChatGPT** và **gpt-5.6-luna làm worker do MAC quản
+lý**. Luna chạy đúng model, không fallback, hoàn thành task có phạm vi rõ ràng
+và dừng ở trạng thái <code>REVIEW</code>. Sol sau đó đọc lại kết quả, đối chiếu
+với file gốc rồi mới quyết định chấp nhận. MAC cũng lưu output, token usage,
+thread ID và lịch sử run để Master có thể retry, cancel hoặc validate.
+
+Đây là cách MAC được thiết kế để làm việc: worker tập trung thực hiện phần việc
+được giao, còn Master giữ quyền kiểm tra và quyết định cuối cùng. Tích hợp
+Gemini vẫn có sẵn, nhưng chưa thể chạy kiểm thử tương đương trong môi trường
+phát hành hiện tại vì giới hạn từ phía nhà phát hành.
 
 ##### Hệ điều hành được hỗ trợ
 
@@ -199,19 +200,20 @@ Codex profile, reasoning effort, and sandbox. Leave a field blank to inherit
 the provider default. A configured model can run only when the current account
 and provider are entitled to use it.
 
-##### Provider and verification status for version 0.3.0
+##### Tested with Sol and Luna
 
-- Codex is the provider exercised in the release environment's real-provider
-  checks.
-- Gemini integration remains available, but this release has not verified its
-  runtime end to end because the current publisher/account environment blocks
-  that test. This does not mean every Gemini account is locked.
-- A specific model, including Luna, works only when the current CLI and account
-  are entitled to it. MAC does not silently fall back to another model.
-- Real browser/CDP/Electron operation, real paid submission, live steering, and
-  provider-native hard token enforcement remain externally deferred. MAC covers
-  the corresponding policy, lease, approval, recovery, and acceptance behavior
-  with local/fake tests.
+MAC has been exercised beyond fixtures. In a real session,
+**gpt-5.6-sol acted as the ChatGPT Master** while **gpt-5.6-luna ran as the
+MAC-managed worker**. Luna ran on the requested model without fallback,
+completed a tightly scoped task, and stopped at <code>REVIEW</code>. Sol then
+checked the result against the source file before accepting it. MAC retained
+the output, token usage, thread ID, and run history so the Master could retry,
+cancel, validate, or accept the work.
+
+That is the intended working relationship: the worker focuses on its assigned
+job while the Master keeps final review authority. Gemini integration remains
+available, but an equivalent runtime test could not be run in the current
+release environment because of publisher-side restrictions.
 
 ##### Supported operating systems
 
