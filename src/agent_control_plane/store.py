@@ -5,6 +5,7 @@ import hashlib
 import os
 import sqlite3
 import time
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -43,10 +44,15 @@ CREATE TABLE IF NOT EXISTS workers (
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   worker_id TEXT NOT NULL, provider TEXT NOT NULL, session_id TEXT,
+  conversation_id TEXT, provider_session_id TEXT, resume_session_id TEXT, context_checkpoint TEXT,
+  host_instance_id TEXT, owner_pid INTEGER, process_start_identity TEXT, heartbeat_deadline REAL,
   status TEXT NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '', profile_json TEXT NOT NULL DEFAULT '{}',
+  requested_budget_json TEXT NOT NULL DEFAULT '{}', effective_budget_json TEXT NOT NULL DEFAULT '{}', enforcement_source TEXT, budget_mode TEXT NOT NULL DEFAULT 'soft',
   input_tokens INTEGER, cached_input_tokens INTEGER, output_tokens INTEGER, failure_class TEXT,
   output_omitted_bytes INTEGER NOT NULL DEFAULT 0, output_provenance TEXT,
   tool_output_bytes INTEGER NOT NULL DEFAULT 0, files_read INTEGER NOT NULL DEFAULT 0,
+  file_bytes INTEGER NOT NULL DEFAULT 0, prompt_bytes INTEGER NOT NULL DEFAULT 0,
+  model_turns INTEGER NOT NULL DEFAULT 0, wall_time_ms INTEGER NOT NULL DEFAULT 0,
   commands_executed INTEGER NOT NULL DEFAULT 0, soft_budget_exceeded INTEGER NOT NULL DEFAULT 0,
   started_at REAL NOT NULL, finished_at REAL, heartbeat_at REAL, action_count INTEGER NOT NULL DEFAULT 0,
   steering_json TEXT NOT NULL DEFAULT '[]'
@@ -93,6 +99,16 @@ CREATE TABLE IF NOT EXISTS control_allocations (
 CREATE TABLE IF NOT EXISTS control_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT, boss_id TEXT NOT NULL REFERENCES control_bosses(id) ON DELETE CASCADE,
   requested INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'WAITING', created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS managed_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  worker_id TEXT NOT NULL, provider TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'QUEUED', queued_at REAL NOT NULL, started_at REAL, finished_at REAL,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS context_manifests (
+  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+  files_json TEXT NOT NULL, total_bytes INTEGER NOT NULL, provenance TEXT NOT NULL, created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS control_settings (
   id INTEGER PRIMARY KEY CHECK(id=1), policy TEXT NOT NULL DEFAULT 'shared_queue', updated_at REAL NOT NULL
@@ -143,6 +159,14 @@ CREATE TRIGGER IF NOT EXISTS authority_events_no_delete
 BEFORE DELETE ON authority_events BEGIN SELECT RAISE(ABORT, 'authority events are append-only'); END;
 """
 
+def process_start_identity(pid: int) -> str:
+    """Return a kernel process-start token where available."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().split()
+        return fields[21]
+    except (OSError, IndexError):
+        return f"pid:{pid}"
+
 
 class Store:
     TASK_STATUSES = {"READY", "RUNNING", "REVIEW", "ACCEPTED", "DONE", "FAILED", "PAUSED",
@@ -165,18 +189,30 @@ class Store:
         # Scheduler workers may complete on different threads; SQLite serializes
         # short transactions while WAL improves reader/writer coexistence.
         self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+        self._reconcile_lock = threading.Lock()
+        self._queue_lock = threading.Lock()
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        # Additive migration for databases created before durable job payloads.
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(managed_queue)")}
+        if "payload_json" not in columns:
+            self.db.execute("ALTER TABLE managed_queue ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'" )
+            self.db.commit()
         # Additive migrations keep existing SQLite state usable.
         task_columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
         if "execution_json" not in task_columns:
             self.db.execute("ALTER TABLE tasks ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(runs)")}
-        for name, definition in (("profile_json", "TEXT NOT NULL DEFAULT '{}'"), ("input_tokens", "INTEGER"),
+        for name, definition in (("conversation_id", "TEXT"), ("provider_session_id", "TEXT"), ("resume_session_id", "TEXT"), ("context_checkpoint", "TEXT"),
+                                 ("host_instance_id", "TEXT"), ("owner_pid", "INTEGER"), ("process_start_identity", "TEXT"), ("heartbeat_deadline", "REAL"),
+                                 ("requested_budget_json", "TEXT NOT NULL DEFAULT '{}'"), ("effective_budget_json", "TEXT NOT NULL DEFAULT '{}'"), ("enforcement_source", "TEXT"), ("budget_mode", "TEXT NOT NULL DEFAULT 'soft'"),
+                                 ("profile_json", "TEXT NOT NULL DEFAULT '{}'"), ("input_tokens", "INTEGER"),
                                  ("cached_input_tokens", "INTEGER"), ("output_tokens", "INTEGER"), ("failure_class", "TEXT"),
                                  ("output_omitted_bytes", "INTEGER NOT NULL DEFAULT 0"), ("output_provenance", "TEXT"),
                                  ("tool_output_bytes", "INTEGER NOT NULL DEFAULT 0"), ("files_read", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("file_bytes", "INTEGER NOT NULL DEFAULT 0"), ("prompt_bytes", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("model_turns", "INTEGER NOT NULL DEFAULT 0"), ("wall_time_ms", "INTEGER NOT NULL DEFAULT 0"),
                                  ("commands_executed", "INTEGER NOT NULL DEFAULT 0"), ("soft_budget_exceeded", "INTEGER NOT NULL DEFAULT 0"),
                                  ("heartbeat_at", "REAL"), ("action_count", "INTEGER NOT NULL DEFAULT 0"), ("steering_json", "TEXT NOT NULL DEFAULT '[]'")):
             if name not in columns:
@@ -352,7 +388,7 @@ class Store:
             task = self.task(task_id)
             if task is None:
                 raise ValueError(f"unknown task: {task_id}")
-            if task["status"] not in ("READY", "REPAIR"):
+            if task["status"] not in ("READY", "REPAIR", "WAITING_RESOURCE"):
                 raise ValueError(f"task {task_id} is not claimable from {task['status']}")
             if not self.knowledge_ready(worker_id):
                 self.db.rollback(); self.set_task_status(task_id, "WAITING_DECISION")
@@ -695,10 +731,16 @@ class Store:
                         (worker_id, base_commit, self._now(), task_id))
         self.db.commit()
 
-    def start_run(self, run_id: str, task_id: str, worker_id: str, provider: str, session_id: str | None = None, profile=None) -> None:
+    def start_run(self, run_id: str, task_id: str, worker_id: str, provider: str, session_id: str | None = None, profile=None,
+                  conversation_id: str | None = None, provider_session_id: str | None = None,
+                  resume_session_id: str | None = None, context_checkpoint: dict | None = None,
+                  requested_budget: dict | None = None, effective_budget: dict | None = None,
+                  enforcement_source: str | None = None, budget_mode: str = "soft") -> None:
         profile_json = json.dumps(profile.snapshot() if hasattr(profile, "snapshot") else (profile or {}), sort_keys=True)
-        self.db.execute("INSERT INTO runs(id,task_id,worker_id,provider,session_id,status,profile_json,started_at) VALUES(?,?,?,?,?,?,?,?)",
-                        (run_id, task_id, worker_id, provider, session_id, "RUNNING", profile_json, self._now()))
+        self.db.execute("INSERT INTO runs(id,task_id,worker_id,provider,session_id,provider_session_id,resume_session_id,conversation_id,context_checkpoint,status,profile_json,requested_budget_json,effective_budget_json,enforcement_source,budget_mode,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (run_id, task_id, worker_id, provider, session_id, provider_session_id or session_id, resume_session_id, conversation_id,
+                         json.dumps(context_checkpoint, sort_keys=True) if context_checkpoint else None, "RUNNING", profile_json,
+                         json.dumps(requested_budget or {}, sort_keys=True), json.dumps(effective_budget or {}, sort_keys=True), enforcement_source, budget_mode, self._now()))
         self.db.commit()
 
     def record_run_authority(self, run_id: str, policy, context=None) -> None:
@@ -709,6 +751,11 @@ class Store:
                          json.dumps(snapshot, sort_keys=True) if snapshot else None, self._now()))
         self.db.commit()
         self._emit_policy_resolved(run_id, policy, digest(snapshot) if snapshot else None)
+
+    def record_context_manifest(self, run_id: str, files: list[dict], provenance: str = "explicit-allowlist") -> None:
+        total = sum(int(item.get("bytes", 0)) for item in files)
+        self.db.execute("INSERT OR REPLACE INTO context_manifests(run_id,files_json,total_bytes,provenance,created_at) VALUES(?,?,?,?,?)",
+                        (run_id, json.dumps(files, sort_keys=True), total, provenance, self._now())); self.db.commit()
 
     def refresh_run_authority(self, run_id: str, policy, context) -> None:
         """Supervisor-only durable refresh after a material authority/state change."""
@@ -777,8 +824,13 @@ class Store:
         if existing:
             if existing[0] != encoded: raise PermissionError("installation identity cannot be replaced in place")
             return
-        self.db.execute("INSERT INTO installation_identity(id,identity_json,updated_at) VALUES(1,?,?)", (encoded, self._now()))
-        self.db.commit()
+        try:
+            self.db.execute("INSERT INTO installation_identity(id,identity_json,updated_at) VALUES(1,?,?)", (encoded, self._now()))
+            self.db.commit()
+        except sqlite3.IntegrityError:
+            self.db.rollback()
+            current = self.db.execute("SELECT identity_json FROM installation_identity WHERE id=1").fetchone()
+            if not current or current[0] != encoded: raise PermissionError("installation identity cannot be replaced in place")
 
     def record_identity_observation(self, identity: dict) -> None:
         self.db.execute("INSERT INTO identity_observations(identity_json,observed_at) VALUES(?,?)",
@@ -799,21 +851,36 @@ class Store:
     def finish_run(self, run_id: str, status: str, exit_code: int, output: str, session_id: str | None = None,
                    failure_class: str | None = None, usage: dict | None = None) -> None:
         meta = usage or {}
-        self.db.execute("UPDATE runs SET status=?,exit_code=?,output=?,session_id=COALESCE(?,session_id),failure_class=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,output_omitted_bytes=?,output_provenance=?,tool_output_bytes=?,files_read=?,commands_executed=?,soft_budget_exceeded=?,finished_at=? WHERE id=?",
-                        (status, exit_code, output, session_id, failure_class, (usage or {}).get("input_tokens"),
-                         (usage or {}).get("cached_input_tokens"), (usage or {}).get("output_tokens"), meta.get("output_omitted_bytes", 0), meta.get("output_provenance"), meta.get("tool_output_bytes", 0), meta.get("files_read", 0), meta.get("commands_executed", 0), int(meta.get("soft_budget_exceeded", False)), self._now(), run_id))
+        row = self.db.execute("SELECT effective_budget_json,budget_mode FROM runs WHERE id=?", (run_id,)).fetchone()
+        effective = json.loads(row[0] or "{}") if row else {}
+        effective.update({key: meta[key] for key in ("prompt_bytes", "prompt_context_bytes", "input_tokens", "cached_input_tokens", "output_tokens", "tool_output_bytes", "files_read", "file_bytes", "commands_executed", "model_turns", "wall_time_ms") if key in meta})
+        self.db.execute("UPDATE runs SET status=?,exit_code=?,output=?,session_id=COALESCE(?,session_id),failure_class=?,effective_budget_json=?,budget_mode=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,output_omitted_bytes=?,output_provenance=?,tool_output_bytes=?,files_read=?,file_bytes=?,prompt_bytes=?,model_turns=?,wall_time_ms=?,commands_executed=?,soft_budget_exceeded=?,finished_at=? WHERE id=?",
+                        (status, exit_code, output, session_id, failure_class,
+                         json.dumps(effective, sort_keys=True), "hard" if failure_class == "hard_budget_denied" else ("soft" if meta.get("soft_budget_exceeded") or (row and row["budget_mode"] == "soft") else "observed"), (usage or {}).get("input_tokens"),
+                         (usage or {}).get("cached_input_tokens"), (usage or {}).get("output_tokens"), meta.get("output_omitted_bytes", 0), meta.get("output_provenance"), meta.get("tool_output_bytes", 0), meta.get("files_read", 0), meta.get("file_bytes", 0), meta.get("prompt_bytes", 0), meta.get("model_turns", 0), meta.get("wall_time_ms", 0), meta.get("commands_executed", 0), int(meta.get("soft_budget_exceeded", False)), self._now(), run_id))
         self.db.commit()
         self._emit_provider_result(run_id, status, exit_code, len(output.encode("utf-8")), meta)
+
+    def set_run_phase(self, run_id: str, phase: str) -> None:
+        allowed = {"QUEUED", "STARTING", "PROVIDER_RUNNING", "DISCONNECTED", "ORPHANED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}
+        if phase not in allowed: raise ValueError("invalid run phase")
+        self.db.execute("UPDATE runs SET status=? WHERE id=?", (phase, run_id)); self.db.commit()
 
     def latest_run(self, task_id: str, worker_id: str | None = None):
         if worker_id is None:
             return self.db.execute("SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task_id,)).fetchone()
         return self.db.execute("SELECT * FROM runs WHERE task_id=? AND worker_id=? ORDER BY started_at DESC LIMIT 1", (task_id, worker_id)).fetchone()
 
-    def heartbeat(self, run_id: str, action: str | None = None) -> None:
+    def heartbeat(self, run_id: str, action: str | None = None, ttl: float = 30.0) -> None:
         if not self.db.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone(): raise ValueError("unknown run")
-        self.db.execute("UPDATE runs SET heartbeat_at=?, action_count=action_count+? WHERE id=?", (self._now(), int(action is not None), run_id))
+        if ttl <= 0: raise ValueError("heartbeat ttl must be positive")
+        now = self._now()
+        self.db.execute("UPDATE runs SET heartbeat_at=?,heartbeat_deadline=?,action_count=action_count+? WHERE id=?", (now, now + ttl, int(action is not None), run_id))
         self.db.commit()
+
+    def bind_process_identity(self, run_id: str, host_instance_id: str, pid: int, process_start_identity: str, heartbeat_deadline: float) -> None:
+        self.db.execute("UPDATE runs SET host_instance_id=?,owner_pid=?,process_start_identity=?,heartbeat_deadline=? WHERE id=?",
+                        (host_instance_id, pid, process_start_identity, heartbeat_deadline, run_id)); self.db.commit()
 
     def activity_snapshot(self, run_id: str) -> dict[str, Any]:
         run = self.db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -831,31 +898,115 @@ class Store:
         items = json.loads(row[0]); items.append({"instruction": instruction, "scope": scope, "created_at": self._now()})
         self.db.execute("UPDATE runs SET steering_json=? WHERE id=?", (json.dumps(items, sort_keys=True), run_id)); self.db.commit()
 
-    def reconcile(self) -> list[str]:
+    def enqueue_managed(self, task_id: str, worker_id: str, provider: str, reason: str = "capacity", payload: dict | None = None) -> int:
+        with self._queue_lock:
+            cur = self.db.execute("INSERT INTO managed_queue(task_id,worker_id,provider,reason,queued_at,payload_json) VALUES(?,?,?,?,?,?)",
+                                  (task_id, worker_id, provider, reason, self._now(), json.dumps(payload or {}, sort_keys=True, default=str)))
+            self.db.commit(); return int(cur.lastrowid)
+
+    def admit_managed(self, task_id: str, worker_id: str, provider: str, capacity: int) -> tuple[int, str]:
+        """Atomically reserve a durable slot before launching a provider."""
+        if capacity < 1: raise ValueError("managed capacity must be positive")
+        with self._queue_lock:
+            self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            active = self.db.execute("SELECT COUNT(*) FROM managed_queue WHERE status='STARTED'").fetchone()[0]
+            reason = "global capacity" if active >= capacity else "scheduled"
+            cur = self.db.execute("INSERT INTO managed_queue(task_id,worker_id,provider,reason,status,queued_at,started_at) VALUES(?,?,?,?,?,?,?)",
+                                  (task_id, worker_id, provider, reason, "QUEUED" if reason != "scheduled" else "STARTED", self._now(), self._now() if reason == "scheduled" else None))
+            self.db.commit()
+            return int(cur.lastrowid), reason
+
+    def managed_queue(self):
+        return [dict(row) for row in self.db.execute("SELECT * FROM managed_queue ORDER BY id")]
+
+    def mark_managed_started(self, queue_id: int) -> None:
+        with self._queue_lock:
+            self.db.execute("UPDATE managed_queue SET status='STARTED',started_at=? WHERE id=? AND status='QUEUED'", (self._now(), queue_id)); self.db.commit()
+
+    def set_managed_payload(self, queue_id: int, payload: dict) -> None:
+        with self._queue_lock:
+            self.db.execute("UPDATE managed_queue SET payload_json=? WHERE id=? AND status='QUEUED'",
+                            (json.dumps(payload, sort_keys=True, default=str), queue_id)); self.db.commit()
+
+    def mark_managed_finished(self, queue_id: int, status: str = "COMPLETED") -> None:
+        with self._queue_lock:
+            self.db.execute("UPDATE managed_queue SET status=?,finished_at=? WHERE id=?", (status, self._now(), queue_id)); self.db.commit()
+
+    def reconcile(self, host_instance_id: str | None = None) -> list[str]:
         """Recover externally-dead managed processes without trusting stale locks."""
-        recovered = []
-        for worker in self.db.execute("SELECT * FROM workers WHERE status='RUNNING'").fetchall():
-            session = worker["session_id"] or ""
-            if not session.startswith("pid:"):
-                continue
-            try:
-                os.kill(int(session[4:]), 0)
-                alive = True
-            except (ValueError, ProcessLookupError, PermissionError):
-                alive = False
-            if alive:
-                continue
-            worker_id = worker["id"]
-            self.set_worker_status(worker_id, "FAILED")
-            self.db.execute("UPDATE runs SET status='FAILED',exit_code=137,output='process disappeared',finished_at=? WHERE worker_id=? AND status='RUNNING'",
-                            (self._now(), worker_id))
-            task_rows = self.db.execute("SELECT id FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker_id,)).fetchall()
-            for task in task_rows:
-                self.set_task_status(task["id"], "FAILED")
-                self.release_task_leases(task["id"])
-                recovered.append(task["id"])
-        self.db.commit()
-        return recovered
+        with self._reconcile_lock:
+            # Serialize the complete state transition across independent Store
+            # connections; recovery must not expose half-updated leases/tasks.
+            self.db.execute("BEGIN IMMEDIATE")
+            recovered = []
+            for worker in self.db.execute("SELECT * FROM workers WHERE status='RUNNING'").fetchall():
+                session = worker["session_id"] or ""
+                active_run = self.db.execute("SELECT * FROM runs WHERE worker_id=? AND status IN ('RUNNING','STARTING','PROVIDER_RUNNING','DISCONNECTED') ORDER BY started_at DESC LIMIT 1", (worker["id"],)).fetchone()
+                # Provider-native thread IDs do not expose a local PID. They
+                # still must fail closed on host loss or heartbeat expiry.
+                if active_run and host_instance_id and active_run["host_instance_id"] and active_run["host_instance_id"] != host_instance_id:
+                    self.db.execute("UPDATE runs SET status='ORPHANED' WHERE id=?", (active_run["id"],))
+                    self.db.execute("UPDATE workers SET status='ORPHANED',updated_at=? WHERE id=?", (self._now(), worker["id"]))
+                    task_row = self.db.execute("SELECT id FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker["id"],)).fetchone()
+                    if task_row:
+                        self.db.execute("UPDATE tasks SET status='WAITING_DECISION',updated_at=? WHERE id=?", (self._now(), task_row["id"]))
+                        self.db.execute("DELETE FROM leases WHERE task_id=?", (task_row["id"],))
+                        self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)", ("BLOCKER", task_row["id"], worker["id"], json.dumps({"reason": "previous MCP host no longer owns run", "recovery": "resume provider session or restart task"}), self._now()))
+                    continue
+                if active_run and active_run["heartbeat_deadline"] and active_run["heartbeat_deadline"] < self._now():
+                    self.db.execute("UPDATE runs SET status='DISCONNECTED' WHERE id=?", (active_run["id"],))
+                    self.db.execute("UPDATE workers SET status='DISCONNECTED',updated_at=? WHERE id=?", (self._now(), worker["id"]))
+                    task_row = self.db.execute("SELECT id FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker["id"],)).fetchone()
+                    if task_row:
+                        self.db.execute("UPDATE tasks SET status='WAITING_DECISION',updated_at=? WHERE id=?", (self._now(), task_row["id"]))
+                        self.db.execute("DELETE FROM leases WHERE task_id=?", (task_row["id"],))
+                        self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)", ("BLOCKER", task_row["id"], worker["id"], json.dumps({"reason": "heartbeat expired", "recovery": "reconcile or resume provider session"}), self._now()))
+                    continue
+                if not session.startswith("pid:"):
+                    continue
+                try:
+                    os.kill(int(session[4:]), 0); alive = True
+                except (ValueError, ProcessLookupError, PermissionError):
+                    alive = False
+                if alive:
+                    run = self.db.execute("SELECT * FROM runs WHERE worker_id=? AND status IN ('RUNNING','STARTING','PROVIDER_RUNNING','DISCONNECTED') ORDER BY started_at DESC LIMIT 1", (worker["id"],)).fetchone()
+                    if run and host_instance_id and run["host_instance_id"] and run["host_instance_id"] != host_instance_id:
+                        self.db.execute("UPDATE runs SET status='ORPHANED' WHERE id=?", (run["id"],))
+                        self.db.execute("UPDATE workers SET status='ORPHANED',updated_at=? WHERE id=?", (self._now(), worker["id"]))
+                        task_row = self.db.execute("SELECT id,status FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker["id"],)).fetchone()
+                        if task_row:
+                            self.db.execute("UPDATE tasks SET status='WAITING_DECISION',updated_at=? WHERE id=?", (self._now(), task_row["id"]))
+                            self.db.execute("DELETE FROM leases WHERE task_id=?", (task_row["id"],))
+                            self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)", ("BLOCKER", task_row["id"], worker["id"], json.dumps({"reason": "previous MCP host no longer owns run", "recovery": "resume provider session or restart task"}), self._now()))
+                        continue
+                    if run and run["process_start_identity"] and process_start_identity(int(session[4:])) != run["process_start_identity"]:
+                        alive = False
+                    else:
+                        if run and run["heartbeat_deadline"] and run["heartbeat_deadline"] < self._now():
+                            self.db.execute("UPDATE runs SET status='DISCONNECTED' WHERE id=?", (run["id"],))
+                            self.db.execute("UPDATE workers SET status='DISCONNECTED',updated_at=? WHERE id=?", (self._now(), worker["id"]))
+                            task_row = self.db.execute("SELECT id,status FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker["id"],)).fetchone()
+                            if task_row:
+                                self.db.execute("UPDATE tasks SET status='WAITING_DECISION',updated_at=? WHERE id=?", (self._now(), task_row["id"]))
+                                self.db.execute("DELETE FROM leases WHERE task_id=?", (task_row["id"],))
+                                self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)", ("BLOCKER", task_row["id"], worker["id"], json.dumps({"reason": "heartbeat expired", "recovery": "reconcile or resume provider session"}), self._now()))
+                        continue
+                worker_id = worker["id"]
+                self.db.execute("UPDATE workers SET status='FAILED',updated_at=? WHERE id=?", (self._now(), worker_id))
+                self.db.execute("UPDATE runs SET status='FAILED',exit_code=137,output='process disappeared',finished_at=? WHERE worker_id=? AND status IN ('RUNNING','STARTING','PROVIDER_RUNNING','DISCONNECTED')", (self._now(), worker_id))
+                task_rows = self.db.execute("SELECT id FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker_id,)).fetchall()
+                for task in task_rows:
+                    self.db.execute("UPDATE tasks SET status='FAILED',updated_at=? WHERE id=?", (self._now(), task["id"]))
+                    self.db.execute("DELETE FROM leases WHERE task_id=?", (task["id"],)); recovered.append(task["id"])
+            # A restarted MCP host loses process-local handles. Durable queue
+            # rows must not remain STARTED forever when no live run owns them.
+            for queued in self.db.execute("SELECT * FROM managed_queue WHERE status='STARTED'").fetchall():
+                run = self.db.execute("SELECT status FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (queued["task_id"],)).fetchone()
+                if not run or run["status"] not in {"RUNNING", "STARTING", "PROVIDER_RUNNING"}:
+                    self.db.execute("UPDATE managed_queue SET status='ORPHANED',finished_at=? WHERE id=?", (self._now(), queued["id"]))
+            self.db.commit()
+            return recovered
 
     def add_message(self, msg_type: str, payload: dict[str, Any], task_id=None, worker_id=None) -> None:
         self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)",

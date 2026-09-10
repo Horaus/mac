@@ -5,6 +5,14 @@ import uuid
 import os
 import signal
 import json
+import threading
+import time
+import fnmatch
+import hashlib
+import time
+import re
+import shutil
+import tempfile
 from pathlib import Path
 
 from .providers import ManagedRun, ProviderAdapter, WorkerResult
@@ -15,10 +23,13 @@ def _inject_context(prompt: str, context: str, profile: ExecutionProfile) -> str
         context += "\nALLOWED PATHS:\n" + "\n".join(profile.context.allowed_paths)
     if profile.context.max_input_tokens is not None:
         budget_chars = profile.context.max_input_tokens * 4
-        context = context[:budget_chars]
-    return prompt + ("\n\n" + context if context else "")
-from .store import Store
+    combined = prompt + ("\n\n" + context if context else "")
+    return combined[:profile.context.max_input_tokens * 4] if profile.context.max_input_tokens is not None else combined
+from .store import Store, process_start_identity
 from .authority import AuthorityPolicy, ContextPacket, RuntimeOperation, RuntimeReport, bound_output, classify_mutation, validate_runtime_operation, validate_runtime_mutation
+from .provisioning import DependencyContract, verify_offline
+
+HOST_INSTANCE_ID = f"host-{uuid.uuid4().hex}"
 
 def _bounded_result(result: WorkerResult, profile: ExecutionProfile) -> WorkerResult:
     bounded = bound_output(result.output, profile.context.max_output_bytes, "provider.stdout")
@@ -45,6 +56,64 @@ def _context_packet(store: Store, task_id: str, policy: AuthorityPolicy, supplie
                          acceptance_criteria=("worker result is reviewable",),
                          stop_conditions=("missing authority", "validation failure"),
                          response_schema={"status": "string", "evidence": "array"})
+
+def _allowlist_manifest(cwd: Path, patterns: tuple[str, ...]) -> list[dict]:
+    result = []
+    for path in sorted(p for p in cwd.rglob("*") if p.is_file() and any(fnmatch.fnmatch(str(p.relative_to(cwd)), pattern) for pattern in patterns)):
+        data = path.read_bytes()
+        result.append({"path": str(path.relative_to(cwd)), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return result
+
+def _restricted_context(cwd: Path, patterns: tuple[str, ...]) -> tuple[str, list[dict]]:
+    """Build context solely from explicitly allowlisted files."""
+    manifest = _allowlist_manifest(cwd, patterns)
+    chunks = []
+    for item in manifest:
+        data = (cwd / item["path"]).read_text(errors="replace")
+        chunks.append(f"FILE {item['path']}:\n{data}")
+    return "\n\n".join(chunks), manifest
+
+def _restricted_workspace(cwd: Path, manifest: list[dict]) -> Path:
+    """Create a real read-only-input workspace containing only allowlisted files."""
+    workspace = Path(tempfile.mkdtemp(prefix="mac-restricted-"))
+    for item in manifest:
+        source = cwd / item["path"]
+        target = workspace / item["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return workspace
+
+def _cleanup_restricted_workspace(workspace: Path | None) -> None:
+    if workspace is not None:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+def _dependency_preflight(store: Store, task, task_id: str, worker_id: str) -> None:
+    execution = json.loads(task["execution_json"] or "{}")
+    dependency = execution.get("dependency_contract")
+    dependency_store = execution.get("dependency_store")
+    if dependency and dependency_store:
+        readiness = verify_offline(DependencyContract(**dependency), dependency_store)
+        if not readiness["ready"]:
+            store.set_task_status(task_id, "WAITING_DEPENDENCY")
+            store.add_message("BLOCKER", readiness, task_id=task_id, worker_id=worker_id)
+            raise RuntimeError(readiness["reason"])
+
+def _budget_snapshot(profile: ExecutionProfile) -> dict:
+    return {
+        "prompt_context_bytes": None,
+        "estimated_input_tokens": profile.context.max_input_tokens,
+        "cumulative_input_tokens": profile.context.hard_input_tokens,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "tool_output_bytes": None,
+        "files_read": None,
+        "file_bytes": None,
+        "commands": None,
+        "model_turns": None,
+        "wall_time_ms": None,
+        "max_output_bytes": profile.context.max_output_bytes,
+        "enforcement": "hard-stream-and-soft-post-run" if profile.context.hard_input_tokens is not None else "soft-post-run",
+    }
 
 def authorize_runtime_action(store: Store, policy: AuthorityPolicy, capability: str,
                              report: RuntimeReport | None, resource: str | None = None,
@@ -114,33 +183,93 @@ def report_blocker(store: Store, task_id: str, blocker: str, external_state_vers
 
 def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdapter,
                prompt: str, cwd: str | Path, base_commit: str | None = None,
-               profile: ExecutionProfile | None = None, authority=None, context=None) -> WorkerResult:
+               profile: ExecutionProfile | None = None, authority=None, context=None,
+               conversation_id: str | None = None, resume_session_id: str | None = None,
+               context_checkpoint: dict | None = None, resume_from_task_id: str | None = None,
+               preserve_resume_snapshot: bool = False) -> WorkerResult:
     """Run one provider worker and record a reviewable result; never integrate it."""
     task = store.task(task_id)
     if task is None:
         raise ValueError(f"unknown task: {task_id}")
     store.add_worker(worker_id, adapter.name, worktree=str(cwd))
-    profile = profile or ExecutionProfile()
+    if resume_session_id and preserve_resume_snapshot:
+        source = store.latest_run(resume_from_task_id or task_id, None if resume_from_task_id else worker_id)
+        profile = profile_from(json.loads(source["profile_json"])) if source and source["profile_json"] else (profile or ExecutionProfile())
+    else:
+        profile = profile or ExecutionProfile()
     adapter.validate_profile(profile)
     resolved_authority = authority or AuthorityPolicy()
     resolved_authority.require("provider.preflight")
+    packet = _context_packet(store, task_id, resolved_authority, context)
+    if context_checkpoint:
+        packet = ContextPacket(packet.version, packet.objective, {**packet.current_state, "checkpoint": context_checkpoint},
+                               packet.authorizations, packet.prohibited_actions, packet.resources, packet.leases,
+                               packet.relevant_files, packet.runtime, packet.acceptance_criteria, packet.stop_conditions, packet.response_schema)
+    restricted_manifest = None
+    restricted_workspace = None
+    if profile.context.allowed_paths:
+        raw_context, restricted_manifest = _restricted_context(Path(cwd), profile.context.allowed_paths)
+        restricted_workspace = _restricted_workspace(Path(cwd), restricted_manifest)
+    else:
+        raw_context = store.knowledge_context(profile.context.knowledge_mode)
+    # `max_input_tokens` remains the prompt/context estimate; the serialized
+    # authority packet is persisted and sent separately, and provider usage is
+    # what determines observed/hard enforcement.  Do not turn a soft budget
+    # into a claim-blocking limit merely because the packet has fixed metadata.
+    if profile.context.max_input_tokens is not None and len((prompt + ("\n\n" + raw_context if raw_context else "")).encode("utf-8")) > profile.context.max_input_tokens * 4:
+        raise ValueError("prompt/context packet exceeds preflight budget")
+    prompt = _inject_context(prompt, raw_context, profile)
+    _dependency_preflight(store, task, task_id, worker_id)
+    if resume_session_id:
+        # This is the synchronous compatibility facade, but it must use the
+        # provider-native resume boundary rather than merely persisting a
+        # session id and calling adapter.run().
+        if context_checkpoint:
+            prompt += "\n\nSUPERVISOR CONTEXT CHECKPOINT:\n" + json.dumps(context_checkpoint, sort_keys=True)
+        resumed = resume_managed_worker(store, task_id, worker_id, adapter, resume_session_id, prompt, cwd,
+                                         profile, resume_from_task_id=resume_from_task_id,
+                                         authority=resolved_authority, context=context,
+                                         context_checkpoint=context_checkpoint)
+        store.record_run_authority(resumed.run_id, resolved_authority, packet)
+        started_at = time.monotonic()
+        try:
+            result = resumed.wait()
+        except Exception:
+            store.set_run_phase(resumed.run_id, "FAILED")
+            store.set_task_status(task_id, "FAILED")
+            raise
+        result = _bounded_result(result, profile)
+        prompt_bytes = len(prompt.encode("utf-8"))
+        result.usage.update({"prompt_bytes": prompt_bytes, "prompt_context_bytes": prompt_bytes, "wall_time_ms": int((time.monotonic() - started_at) * 1000)})
+        status = "REVIEW" if result.exit_code == 0 else "FAILED"
+        store.set_worker_status(worker_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.session_id)
+        store.finish_run(resumed.run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id, result.failure_class, result.usage)
+        store.set_task_status(task_id, status); store.release_task_leases(task_id)
+        store.add_message("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER", {"exit_code": result.exit_code, "output": result.output}, task_id, worker_id)
+        return result
+    # All deterministic preflight work happens before claiming the task.
     store.claim_task(task_id, worker_id, base_commit)
     store.capture_declared_resources(task_id)
-    packet = _context_packet(store, task_id, resolved_authority, context)
-    prompt = _inject_context(prompt, store.knowledge_context(profile.context.knowledge_mode), profile)
     run_id = f"run-{uuid.uuid4().hex}"
-    store.start_run(run_id, task_id, worker_id, adapter.name, profile=profile)
+    budget = _budget_snapshot(profile)
+    store.start_run(run_id, task_id, worker_id, adapter.name, profile=profile, conversation_id=conversation_id,
+                    provider_session_id=resume_session_id, resume_session_id=resume_session_id,
+                    context_checkpoint=context_checkpoint, requested_budget=budget, effective_budget=budget,
+                    enforcement_source="mac-preflight", budget_mode="hard" if profile.context.hard_input_tokens is not None else "soft")
+    if restricted_manifest is not None:
+        store.record_context_manifest(run_id, restricted_manifest)
     store.record_run_authority(run_id, resolved_authority, packet)
     try:
+        started_at = time.monotonic()
         try:
             try:
-                result = adapter.run(prompt, Path(cwd), profile, context_packet=packet)
+                result = adapter.run(prompt, restricted_workspace or Path(cwd), profile, context_packet=packet)
             except TypeError as context_error:
                 if "context_packet" not in str(context_error): raise
-                result = adapter.run(prompt, Path(cwd), profile)
+                result = adapter.run(prompt, restricted_workspace or Path(cwd), profile)
         except TypeError as error:
             if "positional argument" not in str(error): raise
-            result = adapter.run(prompt, Path(cwd))
+            result = adapter.run(prompt, restricted_workspace or Path(cwd))
     except Exception:
         store.finish_run(run_id, "FAILED", 1, "provider raised an exception")
         store.set_worker_status(worker_id, "FAILED")
@@ -148,6 +277,8 @@ def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdap
         store.release_task_leases(task_id)
         raise
     result = _bounded_result(result, profile)
+    prompt_bytes = len(prompt.encode("utf-8"))
+    result.usage.update({"prompt_bytes": prompt_bytes, "prompt_context_bytes": prompt_bytes, "wall_time_ms": int((time.monotonic() - started_at) * 1000)})
     status = "REVIEW" if result.exit_code == 0 else "FAILED"
     store.set_worker_status(worker_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.session_id)
     store.finish_run(run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id, result.failure_class, result.usage)
@@ -158,12 +289,15 @@ def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdap
     store.release_task_leases(task_id)
     store.add_message("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER",
                       {"exit_code": result.exit_code, "output": result.output}, task_id, worker_id)
+    _cleanup_restricted_workspace(restricted_workspace)
     return result
 
 
-def validate(store: Store, task_id: str, command: str, cwd: str | Path, timeout: float = 300) -> int:
+def validate(store: Store, task_id: str, command: str, cwd: str | Path, timeout: float = 300, authority=None) -> int:
     if timeout <= 0:
         raise ValueError("validation timeout must be positive")
+    if re.search(r"(?:pnpm|npm|yarn|pip|uv)\s+(?:install|add|fetch|update|sync|download)\b", command.lower()):
+        (authority or AuthorityPolicy()).require("dependency.install")
     process = subprocess.Popen(command, cwd=cwd, shell=True, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=True)
     try:
@@ -193,30 +327,64 @@ def start_managed_worker(store: Store, task_id: str, worker_id: str, adapter: Pr
     adapter.validate_profile(profile)
     resolved_authority = authority or AuthorityPolicy()
     resolved_authority.require("provider.preflight")
-    store.claim_task(task_id, worker_id)
     packet = _context_packet(store, task_id, resolved_authority, context)
-    prompt = _inject_context(prompt, store.knowledge_context(profile.context.knowledge_mode), profile)
+    restricted_manifest = None
+    restricted_workspace = None
+    if profile.context.allowed_paths:
+        raw_context, restricted_manifest = _restricted_context(Path(cwd), profile.context.allowed_paths)
+        restricted_workspace = _restricted_workspace(Path(cwd), restricted_manifest)
+    else:
+        raw_context = store.knowledge_context(profile.context.knowledge_mode)
+    if profile.context.max_input_tokens is not None and len((prompt + ("\n\n" + raw_context if raw_context else "")).encode("utf-8")) > profile.context.max_input_tokens * 4:
+        raise ValueError("prompt/context packet exceeds preflight budget")
+    prompt = _inject_context(prompt, raw_context, profile)
+    _dependency_preflight(store, task, task_id, worker_id)
+    store.claim_task(task_id, worker_id)
     try:
         try:
-            run = adapter.start(prompt, Path(cwd), profile, context_packet=packet)
+            run = adapter.start(prompt, restricted_workspace or Path(cwd), profile, context_packet=packet)
         except TypeError as context_error:
             if "context_packet" not in str(context_error): raise
-            run = adapter.start(prompt, Path(cwd), profile)
+            run = adapter.start(prompt, restricted_workspace or Path(cwd), profile)
     except Exception:
         store.set_task_status(task_id, "FAILED")
         raise
     store.add_worker(worker_id, adapter.name, run.session_id, str(cwd))
     run.run_id = f"run-{uuid.uuid4().hex}"
-    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id, profile)
+    run.hard_input_tokens = getattr(profile.context, "hard_input_tokens", None)
+    budget = _budget_snapshot(profile)
+    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id, profile,
+                    provider_session_id=run.session_id,
+                    requested_budget=budget, effective_budget=budget, enforcement_source="mac-preflight",
+                    budget_mode="hard" if profile.context.hard_input_tokens is not None else "soft")
+    if restricted_manifest is not None:
+        store.record_context_manifest(run.run_id, restricted_manifest)
+    store.bind_process_identity(run.run_id, HOST_INSTANCE_ID, run.process.pid, process_start_identity(run.process.pid), time.time() + 30)
+    store.set_run_phase(run.run_id, "PROVIDER_RUNNING")
     store.record_run_authority(run.run_id, resolved_authority, packet)
+    run.restricted_workspace = restricted_workspace
+    def heartbeat_loop():
+        heartbeat_store = Store(store.path)
+        while run.process.poll() is None:
+            try:
+                heartbeat_store.heartbeat(run.run_id, "provider")
+            except Exception:
+                heartbeat_store.close()
+                return
+            time.sleep(0.25)
+        heartbeat_store.close()
+    threading.Thread(target=heartbeat_loop, name=f"mac-heartbeat-{run.run_id}", daemon=True).start()
     return run
 
 
 def finish_managed_worker(store: Store, task_id: str, worker_id: str, run: ManagedRun) -> WorkerResult:
+    started_at = time.monotonic()
     result = run.wait()
     store.heartbeat(run.run_id, "finish")
     profile = profile_from(json.loads(store.db.execute("SELECT profile_json FROM runs WHERE id=?", (run.run_id,)).fetchone()[0]))
     result = _bounded_result(result, profile)
+    prompt_bytes = len("managed run".encode())
+    result.usage.update({"prompt_bytes": prompt_bytes, "prompt_context_bytes": prompt_bytes, "wall_time_ms": int((time.monotonic() - started_at) * 1000)})
     status = "REVIEW" if result.exit_code == 0 else "FAILED"
     store.set_worker_status(worker_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.session_id)
     store.finish_run(run.run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id, result.failure_class, result.usage)
@@ -227,6 +395,7 @@ def finish_managed_worker(store: Store, task_id: str, worker_id: str, run: Manag
     store.release_task_leases(task_id)
     store.add_message("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER",
                       {"exit_code": result.exit_code, "output": result.output}, task_id, worker_id)
+    _cleanup_restricted_workspace(getattr(run, "restricted_workspace", None))
     return result
 
 
@@ -254,13 +423,18 @@ def cancel_managed_worker(store: Store, task_id: str, worker_id: str, run: Manag
     store.set_worker_status(worker_id, "FAILED")
     store.finish_run(run.run_id, "CANCELLED", 130, result.output or reason, run.session_id)
     store.cancel_task(task_id, reason)
+    _cleanup_restricted_workspace(getattr(run, "restricted_workspace", None))
 
 
 def resume_managed_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdapter,
-                          session_id: str, prompt: str, cwd: str | Path, profile: ExecutionProfile | None = None) -> ManagedRun:
+                          session_id: str, prompt: str, cwd: str | Path, profile: ExecutionProfile | None = None,
+                          resume_from_task_id: str | None = None, authority=None, context=None,
+                          context_checkpoint: dict | None = None) -> ManagedRun:
     task = store.task(task_id)
     if task is None: raise ValueError(f"unknown task: {task_id}")
-    previous = store.latest_run(task_id, worker_id)
+    # A provider session may be handed to a different worker; source-task
+    # history, not the destination worker identity, owns the snapshot.
+    previous = store.latest_run(resume_from_task_id or task_id, None if resume_from_task_id else worker_id)
     snapshot = profile_from(json.loads(previous["profile_json"])) if previous and previous["profile_json"] else ExecutionProfile()
     from_snapshot = profile is None
     if profile is None:
@@ -272,9 +446,32 @@ def resume_managed_worker(store: Store, task_id: str, worker_id: str, adapter: P
         if profile.profile != snapshot.profile or profile.sandbox != snapshot.sandbox:
             raise ValueError("resume override changes unsupported Codex session settings")
     adapter.validate_profile(profile)
+    resolved_authority = authority or AuthorityPolicy()
+    resolved_authority.require("provider.preflight")
+    packet = _context_packet(store, task_id, resolved_authority, context)
+    if context_checkpoint:
+        packet = ContextPacket(packet.version, packet.objective, {**packet.current_state, "checkpoint": context_checkpoint},
+                               packet.authorizations, packet.prohibited_actions, packet.resources, packet.leases,
+                               packet.relevant_files, packet.runtime, packet.acceptance_criteria, packet.stop_conditions, packet.response_schema)
     resume_snapshot = from_snapshot or profile.snapshot() == snapshot.snapshot()
+    if adapter.__class__.resume is ProviderAdapter.resume:
+        if previous: store.set_run_phase(previous["id"], "ORPHANED")
+        if task["status"] == "READY": store.set_task_status(task_id, "WAITING_DECISION")
+        store.add_message("BLOCKER", {"reason": "provider session cannot resume", "session_id": session_id, "recovery": "start a new session with context_checkpoint"}, task_id=task_id, worker_id=worker_id)
+        raise RuntimeError("provider cannot resume session; recovery requires a new context checkpoint")
+    # Resume is still a new managed execution for the destination task. Claim
+    # it and capture declared resources before invoking the provider boundary.
+    store.claim_task(task_id, worker_id)
+    store.capture_declared_resources(task_id)
     try:
         run = adapter.resume(session_id, prompt, Path(cwd), profile, resume_snapshot=resume_snapshot)
+    except NotImplementedError as error:
+        if previous:
+            store.set_run_phase(previous["id"], "ORPHANED")
+        if task["status"] == "READY":
+            store.set_task_status(task_id, "WAITING_DECISION")
+        store.add_message("BLOCKER", {"reason": "provider session cannot resume", "session_id": session_id, "recovery": "start a new session with context_checkpoint"}, task_id=task_id, worker_id=worker_id)
+        raise RuntimeError("provider cannot resume session; recovery requires a new context checkpoint") from error
     except TypeError as error:
         if "positional argument" not in str(error) and "unexpected keyword" not in str(error): raise
         try:
@@ -283,7 +480,16 @@ def resume_managed_worker(store: Store, task_id: str, worker_id: str, adapter: P
             if "positional argument" not in str(legacy_error): raise
             run = adapter.resume(session_id, prompt, Path(cwd))
     run.run_id = f"run-{uuid.uuid4().hex}"
-    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id, profile)
+    run.hard_input_tokens = getattr(profile.context, "hard_input_tokens", None)
+    budget = _budget_snapshot(profile)
+    store.start_run(run.run_id, task_id, worker_id, adapter.name, run.session_id, profile,
+                    provider_session_id=session_id, resume_session_id=session_id,
+                    context_checkpoint=context_checkpoint,
+                    requested_budget=budget, effective_budget=budget, enforcement_source="mac-preflight",
+                    budget_mode="hard" if profile.context.hard_input_tokens is not None else "soft")
+    if profile.context.allowed_paths:
+        store.record_context_manifest(run.run_id, _allowlist_manifest(Path(cwd), profile.context.allowed_paths))
+    store.record_run_authority(run.run_id, resolved_authority, packet)
     store.set_worker_status(worker_id, "RUNNING", run.session_id)
     store.set_task_status(task_id, "RUNNING")
     return run

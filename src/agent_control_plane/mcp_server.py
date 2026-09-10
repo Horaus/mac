@@ -9,15 +9,19 @@ from .store import Store
 from .providers import provider
 from .service import (arbitrate_conflict, cancel_managed_worker, finish_managed_worker,
                        pause_managed_worker, resume_live_worker, run_worker,
-                       start_managed_worker, validate, authorize_action, authorize_runtime_action, report_blocker,
-                       submit_provider, publish_external, delete_destructive)
+                       start_managed_worker, resume_managed_worker, validate, authorize_action, authorize_runtime_action, report_blocker,
+                       submit_provider, publish_external, delete_destructive, _dependency_preflight)
+from .service import _inject_context, _restricted_context
+from .service import HOST_INSTANCE_ID
 from .orchestrator import Supervisor
-from .profiles import resolve_profile
+from .profiles import resolve_profile, profile_from
 from .authority import ApprovalToken, AuthorityPolicy, ContextPacket, ExecutionMode, digest
+from .provisioning import DependencyContract, verify_offline
+from .managed_scheduler import ManagedJob, ManagedScheduler
 
 
 TOOL_DEFS = {
-    "status": {}, "inbox": {}, "reconcile": {},
+    "status": {}, "inbox": {}, "reconcile": {}, "managed_queue_status": {},
     "control_status": {},
     "control_set_policy": {"policy": {"type": "string"}},
     "control_register_master": {"master_id": {"type": "string"}, "name": {"type": "string"}, "min_workers": {"type": "number"}, "max_workers": {"type": "number"}},
@@ -46,13 +50,13 @@ TOOL_DEFS = {
     "accept_task": {"task_id": {"type": "string"}}, "pause_task": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
     "resume_task": {"task_id": {"type": "string"}}, "cancel_task": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
     "resolve_conflict": {"decision_id": {"type": "string"}, "task_id": {"type": "string"}, "decision": {"type": "string"}, "reason": {"type": "string"}},
-    "run_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "execution": {"type": "object"}},
-    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "execution": {"type": "object"}},
+    "run_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "resume_from_task_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object"}, "wait": {"type": "boolean"}},
+    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object"}, "resources": {"type": "array"}},
     "pause_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "resume_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "wait_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "cancel_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "reason": {"type": "string"}},
-    "validate": {"task_id": {"type": "string"}, "command": {"type": "string"}, "cwd": {"type": "string"}, "timeout": {"type": "number"}},
+    "validate": {"task_id": {"type": "string"}, "command": {"type": "string"}, "cwd": {"type": "string"}, "timeout": {"type": "number"}, "execution": {"type": "object"}},
     "create_approval": {"token_id": {"type": "string"}, "capability": {"type": "string"}, "project_id": {"type": "string"}, "provider_id": {"type": "string"}, "job_id": {"type": "string"}, "run_id": {"type": "string"}, "task_id": {"type": "string"}, "payload": {"type": "object"}, "idempotency_key": {"type": "string"}, "max_attempts": {"type": "number"}, "expires_at": {"type": "number"}},
     "consume_approval": {"token_id": {"type": "string"}, "capability": {"type": "string"}, "project_id": {"type": "string"}, "provider_id": {"type": "string"}, "job_id": {"type": "string"}, "run_id": {"type": "string"}, "task_id": {"type": "string"}, "idempotency_key": {"type": "string"}, "payload": {"type": "object"}},
     "authorize_action": {"capability": {"type": "string"}, "payload": {"type": "object"}, "token_id": {"type": "string"}, "destructive": {"type": "boolean"}, "external": {"type": "boolean"}, "project_id": {"type": "string"}, "provider_id": {"type": "string"}, "job_id": {"type": "string"}, "idempotency_key": {"type": "string"}, "run_id": {"type": "string"}, "task_id": {"type": "string"}, "execution": {"type": "object"}},
@@ -63,11 +67,27 @@ TOOL_DEFS = {
     "heartbeat": {"run_id": {"type": "string"}, "action": {"type": "string"}},
     "queue_steering": {"run_id": {"type": "string"}, "instruction": {"type": "string"}, "scope": {"type": "string"}},
     "refresh_authority": {"run_id": {"type": "string"}, "execution": {"type": "object"}, "context": {"type": "object"}},
+    "dependency_check": {"task_id": {"type": "string"}, "contract": {"type": "object"}, "store": {"type": "string"}},
 }
 
 # Managed runs are deliberately process-local: the MCP server owns the
 # subprocess handle, while durable task/run state remains in SQLite.
 ACTIVE_RUNS = {}
+ACTIVE_QUEUE_IDS = {}
+MANAGED_SCHEDULERS = {}
+MANAGED_FUTURES = {}
+MCP_RECOVERY_LOCK = __import__("threading").RLock()
+
+def _managed_scheduler(store: Store, capacity: int) -> ManagedScheduler:
+    """Return the process-wide scheduler for a durable state database."""
+    key = str(store.path.resolve())
+    scheduler = MANAGED_SCHEDULERS.get(key)
+    if scheduler is None or scheduler.max_workers != capacity:
+        if scheduler is not None:
+            scheduler.close()
+        scheduler = ManagedScheduler(store, capacity)
+        MANAGED_SCHEDULERS[key] = scheduler
+    return scheduler
 
 def _external_publish_executor(payload):
     raise NotImplementedError("publish executor is external")
@@ -140,14 +160,48 @@ def _context(args: dict):
         value[key] = tuple(value.get(key, ()))
     return ContextPacket(**value)
 
+def _context_from_snapshot(value):
+    if not value: return None
+    value = dict(value)
+    if isinstance(value.get("runtime"), dict):
+        from .authority import RuntimeReport
+        value["runtime"] = RuntimeReport(**value["runtime"])
+    for key in ("authorizations", "prohibited_actions", "resources", "leases", "relevant_files", "acceptance_criteria", "stop_conditions"):
+        value[key] = tuple(value.get(key, ()))
+    return ContextPacket(**value)
+
+def _recover_live_job(store: Store, queue_id: int, job: ManagedJob) -> None:
+    key = (job.task_id, job.worker_id)
+    adapter = job.adapter
+    if job.resume_session_id:
+        run = resume_managed_worker(store, job.task_id, job.worker_id, adapter, job.resume_session_id,
+                                     job.prompt, job.cwd, profile=job.profile,
+                                     resume_from_task_id=job.resume_from_task_id,
+                                     authority=job.authority, context=job.context,
+                                     context_checkpoint=job.context_checkpoint)
+    else:
+        run = start_managed_worker(store, job.task_id, job.worker_id, adapter, job.prompt, job.cwd,
+                                    profile=job.profile, authority=job.authority, context=job.context)
+    store.mark_managed_started(queue_id)
+    ACTIVE_RUNS[key] = run
+    ACTIVE_QUEUE_IDS[key] = queue_id
+
 
 def dispatch(store: Store, method: str, args: dict) -> object:
     if method == "ping":
         return {}
     if method == "initialize":
+        recovered = store.reconcile(HOST_INSTANCE_ID)
+        config_path = store.path.parent / "config.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        scheduler = _managed_scheduler(store, int(config.get("execution", {}).get("max_concurrent_workers", 2)))
+        recovered_count = len(recovered) + scheduler.recover_queued(
+            provider, profile_from,
+            lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
+            _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.3.1"},
-                "instructions": "You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
+                "serverInfo": {"name": "agent-control-plane", "version": "0.4.0"},
+                "instructions": f"Startup reconciliation recovered {recovered_count} run(s). You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
                             "inputSchema": {"type": "object", "properties": props}}
@@ -156,6 +210,7 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         raise ValueError(f"unsupported method: {method}")
     name, a = args.get("name"), args.get("arguments", {})
     if name == "status": return {"content": [{"type": "text", "text": json.dumps(store.snapshot())}]}
+    if name == "managed_queue_status": return {"content": [{"type": "text", "text": json.dumps(store.managed_queue())}]}
     if name == "create_approval":
         payload = a["payload"]
         store.create_approval(ApprovalToken(a["token_id"], a["capability"], a["project_id"], a["provider_id"], a["job_id"], digest(payload), a["idempotency_key"], int(a.get("max_attempts", 1)), expires_at=float(a.get("expires_at", 0)), run_id=a["run_id"], task_id=a["task_id"]))
@@ -208,20 +263,93 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         if a.get("conversation_id") and _history_enabled(store):
             context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
-        result = run_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile, authority=_authority(a), context=_context(a))
-        return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
+        config_path = store.path.parent / "config.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        scheduler = _managed_scheduler(store, int(config.get("execution", {}).get("max_concurrent_workers", 2)))
+        job = ManagedJob(a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"],
+                                                   profile=profile, authority=_authority(a), context=_context(a),
+                                                   conversation_id=a.get("conversation_id"), resume_session_id=a.get("resume_session_id"),
+                                                   resume_from_task_id=a.get("resume_from_task_id"), context_checkpoint=a.get("context_checkpoint"),
+                                                   preserve_resume_snapshot=bool(a.get("resume_session_id") and not a.get("execution")))
+        submitted = scheduler.submit(job)
+        if submitted["status"] != "STARTED":
+            return {"content": [{"type": "text", "text": json.dumps({"status": submitted["status"], "queue_id": submitted["queue_id"], "reason": submitted["reason"]})}]}
+        key = (a["task_id"], a["worker_id"])
+        MANAGED_FUTURES[key] = (scheduler, submitted["future"], submitted["queue_id"])
+        if a.get("wait", False):
+            result = submitted["future"].result()
+            MANAGED_FUTURES.pop(key, None)
+            return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
+        return {"content": [{"type": "text", "text": json.dumps({"status": "RUNNING", "queue_id": submitted["queue_id"]})}]}
     if name == "start_worker":
         key = (a["task_id"], a["worker_id"])
+        # ACTIVE_RUNS is process-local; temporary/test state databases may
+        # reuse task IDs, so discard a handle that is not present in this DB.
+        if key in ACTIVE_RUNS and store.latest_run(a["task_id"], a["worker_id"]) is None:
+            stale = ACTIVE_RUNS.pop(key, None)
+            process = getattr(stale, "process", None)
+            if process is not None and process.poll() is None:
+                process.terminate()
+            stdout = getattr(process, "stdout", None)
+            if stdout is not None:
+                stdout.close()
+            ACTIVE_QUEUE_IDS.pop(key, None)
         if key in ACTIVE_RUNS:
             raise ValueError("managed worker is already active")
+        config_path = store.path.parent / "config.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        capacity = int(config.get("execution", {}).get("max_concurrent_workers", 2))
+        provider_name = _resolved_provider(store, a["task_id"], a["worker_id"], a)
+        task = store.task(a["task_id"])
+        if task is None:
+            raise ValueError(f"unknown task: {a['task_id']}")
+        # Dependency readiness is a dispatch gate, not a queue side effect.
+        _dependency_preflight(store, task, a["task_id"], a["worker_id"])
         prompt = a["prompt"]
         profile = _resolved_profile(store, a["task_id"], a["worker_id"], a)
         if a.get("conversation_id") and _history_enabled(store):
             context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
-        run = start_managed_worker(store, a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"], profile=profile, authority=_authority(a), context=_context(a))
+        adapter = provider(provider_name)
+        queued_job = ManagedJob(a["task_id"], a["worker_id"], adapter, prompt, a["cwd"],
+                                 tuple((item["resource"], item.get("mode", "WRITE")) for item in a.get("resources", [])),
+                                 profile=profile, authority=_authority(a), context=_context(a),
+                                 conversation_id=a.get("conversation_id"), resume_session_id=a.get("resume_session_id"),
+                                 resume_from_task_id=a.get("resume_from_task_id"), context_checkpoint=a.get("context_checkpoint"),
+                                 lifecycle="live")
+        queued_payload = ManagedScheduler._payload(queued_job)
+        requested_resources = tuple((item["resource"], item.get("mode", "WRITE")) for item in a.get("resources", []))
+        for resource, mode in requested_resources:
+            if not store.acquire(resource, a["task_id"], a["worker_id"], mode):
+                queue_id = store.enqueue_managed(a["task_id"], a["worker_id"], provider_name, f"lease unavailable: {resource}", queued_payload)
+                store.set_task_status(a["task_id"], "WAITING_RESOURCE")
+                ACTIVE_QUEUE_IDS[key] = queue_id
+                return {"content": [{"type": "text", "text": json.dumps({"status": "QUEUED", "queue_id": queue_id, "reason": f"lease unavailable: {resource}"})}]}
+        if key in ACTIVE_QUEUE_IDS:
+            store.mark_managed_finished(ACTIVE_QUEUE_IDS.pop(key), "DISPATCHED")
+        queue_id, admission = store.admit_managed(a["task_id"], a["worker_id"], provider_name, capacity)
+        if admission != "scheduled":
+            store.release_task_leases(a["task_id"])
+            store.set_managed_payload(queue_id, queued_payload)
+            store.set_task_status(a["task_id"], "WAITING_RESOURCE")
+            ACTIVE_QUEUE_IDS[key] = queue_id
+            return {"content": [{"type": "text", "text": json.dumps({"status": "QUEUED", "queue_id": queue_id, "reason": "global capacity"})}]}
+        try:
+            if a.get("resume_session_id"):
+                if profile.context.allowed_paths:
+                    raw_context, _ = _restricted_context(Path(a["cwd"]), profile.context.allowed_paths)
+                else:
+                    raw_context = store.knowledge_context(profile.context.knowledge_mode)
+                prompt = _inject_context(prompt, raw_context, profile)
+                run = resume_managed_worker(store, a["task_id"], a["worker_id"], adapter, a["resume_session_id"], prompt, a["cwd"], profile=profile, resume_from_task_id=a.get("resume_from_task_id"), authority=_authority(a), context=_context(a), context_checkpoint=a.get("context_checkpoint"))
+            else:
+                run = start_managed_worker(store, a["task_id"], a["worker_id"], adapter, prompt, a["cwd"], profile=profile, authority=_authority(a), context=_context(a))
+        except Exception:
+            store.mark_managed_finished(queue_id, "FAILED")
+            raise
         ACTIVE_RUNS[key] = run
-        return {"content": [{"type": "text", "text": json.dumps({"session_id": run.session_id, "status": "RUNNING"})}]}
+        ACTIVE_QUEUE_IDS[key] = queue_id
+        return {"content": [{"type": "text", "text": json.dumps({"session_id": run.session_id, "queue_id": queue_id, "status": "RUNNING"})}]}
     if name == "pause_worker":
         key = (a["task_id"], a["worker_id"])
         run = ACTIVE_RUNS.get(key)
@@ -236,18 +364,31 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         return {"content": [{"type": "text", "text": "resumed"}]}
     if name == "wait_worker":
         key = (a["task_id"], a["worker_id"])
+        if key in MANAGED_FUTURES:
+            scheduler, future, queue_id = MANAGED_FUTURES.pop(key)
+            result = future.result()
+            return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
         run = ACTIVE_RUNS.pop(key, None)
         if run is None: raise ValueError("managed worker is not active")
         result = finish_managed_worker(store, *key, run)
+        if key in ACTIVE_QUEUE_IDS: store.mark_managed_finished(ACTIVE_QUEUE_IDS.pop(key))
+        config_path = store.path.parent / "config.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        with MCP_RECOVERY_LOCK:
+            _managed_scheduler(store, int(config.get("execution", {}).get("max_concurrent_workers", 2))).recover_queued(
+                provider, profile_from,
+                lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
+                _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
     if name == "cancel_worker":
         key = (a["task_id"], a["worker_id"])
         run = ACTIVE_RUNS.pop(key, None)
         if run is None: raise ValueError("managed worker is not active")
         cancel_managed_worker(store, *key, run, a.get("reason", "supervisor cancellation"))
+        if key in ACTIVE_QUEUE_IDS: store.mark_managed_finished(ACTIVE_QUEUE_IDS.pop(key), "CANCELLED")
         return {"content": [{"type": "text", "text": "cancelled"}]}
     if name == "validate":
-        exit_code = validate(store, a["task_id"], a["command"], a["cwd"], a.get("timeout", 300))
+        exit_code = validate(store, a["task_id"], a["command"], a["cwd"], a.get("timeout", 300), _authority(a))
         return {"content": [{"type": "text", "text": json.dumps({"exit_code": exit_code})}]}
     if name == "run_activity":
         return {"content": [{"type": "text", "text": json.dumps(store.activity_snapshot(a["run_id"]), default=str)}]}
@@ -259,7 +400,13 @@ def dispatch(store: Store, method: str, args: dict) -> object:
         execution = a.get("execution", {}); policy = AuthorityPolicy(ExecutionMode(execution.get("mode", "isolated_sandbox")), frozenset(execution.get("capabilities", ["filesystem.read", "provider.preflight"])))
         packet = ContextPacket(**a["context"]); store.refresh_run_authority(a["run_id"], policy, packet)
         return {"content": [{"type": "text", "text": "authority refreshed"}]}
-    if name == "reconcile": return {"content": [{"type": "text", "text": json.dumps({"recovered_tasks": store.reconcile()})}]}
+    if name == "dependency_check":
+        result = verify_offline(DependencyContract(**a["contract"]), a["store"])
+        if not result["ready"] and a.get("task_id"):
+            store.set_task_status(a["task_id"], "WAITING_DEPENDENCY")
+            store.add_message("BLOCKER", result, task_id=a["task_id"])
+        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+    if name == "reconcile": return {"content": [{"type": "text", "text": json.dumps({"recovered_tasks": store.reconcile(HOST_INSTANCE_ID)})}]}
     if name == "declare_resource":
         store.add_resource(a["name"], a["kind"], a.get("paths", [])); return {"content": [{"type": "text", "text": f"created {a['name']}"}]}
     if name == "acquire_resource":

@@ -11,7 +11,7 @@ import textwrap
 from pathlib import Path
 
 from .providers import provider
-from .service import run_worker, validate
+from .service import run_worker, validate, HOST_INSTANCE_ID
 from .store import Store
 from .setup import connect_codex, doctor, run_setup, show_config, show_mcp_config
 from .profiles import resolve_profile
@@ -262,11 +262,12 @@ def main(argv=None) -> int:
     run.add_argument("--task-id", required=True); run.add_argument("--worker-id", required=True)
     run.add_argument("--cwd", default=None); run.add_argument("--prompt", required=True)
     run.add_argument("--provider", choices=["codex", "gemini"], default=None); run.add_argument("--conversation-id", default=None)
+    run.add_argument("--resume-session-id", default=None); run.add_argument("--context-checkpoint", default=None)
     run.add_argument("--model", default=None); run.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default=None)
     run.add_argument("--mode", choices=[m.value for m in ExecutionMode], default=ExecutionMode.ISOLATED_SANDBOX.value)
     run.add_argument("--capability", action="append", default=[])
     check = sub.add_parser("validate")
-    check.add_argument("--task-id", required=True); check.add_argument("--cwd", default=None); check.add_argument("--timeout", type=float, default=300); check.add_argument("validation_command", nargs=argparse.REMAINDER)
+    check.add_argument("--task-id", required=True); check.add_argument("--cwd", default=None); check.add_argument("--timeout", type=float, default=300); check.add_argument("--capability", action="append", default=[]); check.add_argument("validation_command", nargs=argparse.REMAINDER)
     inbox = sub.add_parser("inbox")
     history = sub.add_parser("history").add_subparsers(dest="history_command", required=True)
     history_add = history.add_parser("add")
@@ -301,6 +302,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     path = state_path(args.project)
     store = Store(path)
+    # Startup reconciliation is safe and idempotent; explicit `reconcile`
+    # remains available for operators who want the decision list printed.
+    if args.command != "init":
+        store.reconcile(HOST_INSTANCE_ID)
     try:
         if args.command == "init":
             print(f"initialized {path}")
@@ -363,12 +368,16 @@ def main(argv=None) -> int:
             task_override = json.loads(task["execution_json"]) if task and task["execution_json"] else {}
             profile = resolve_profile(config.get("execution", {}), worker_config, task_override, override)
             authority = AuthorityPolicy(ExecutionMode(args.mode), frozenset(args.capability or ["filesystem.read", "provider.preflight"]))
-            result = run_worker(store, args.task_id, args.worker_id, provider(task_provider), prompt, cwd, profile=profile, authority=authority)
+            checkpoint = json.loads(args.context_checkpoint) if args.context_checkpoint else None
+            result = run_worker(store, args.task_id, args.worker_id, provider(task_provider), prompt, cwd, profile=profile, authority=authority,
+                                conversation_id=args.conversation_id, resume_session_id=args.resume_session_id,
+                                context_checkpoint=checkpoint)
             print(json.dumps({"exit_code": result.exit_code, "output": result.output, "status": store.task(args.task_id)["status"]}))
             return result.exit_code
         elif args.command == "validate":
             cwd = Path(args.cwd or args.project)
-            exit_code = validate(store, args.task_id, " ".join(args.validation_command), cwd, args.timeout)
+            validation_authority = AuthorityPolicy(capabilities=frozenset(args.capability or ["filesystem.read", "provider.preflight"]))
+            exit_code = validate(store, args.task_id, " ".join(args.validation_command), cwd, args.timeout, validation_authority)
             print(json.dumps({"exit_code": exit_code}))
             return exit_code
         elif args.command == "inbox":
@@ -382,7 +391,7 @@ def main(argv=None) -> int:
         elif args.command == "knowledge" and args.knowledge_command == "ack":
             store.acknowledge_knowledge(args.actor, args.worker_id); print("acknowledged")
         elif args.command == "reconcile":
-            print(json.dumps({"recovered_tasks": store.reconcile()}))
+            print(json.dumps({"recovered_tasks": store.reconcile(HOST_INSTANCE_ID)}))
         elif args.command == "review" and args.review_command == "evidence":
             print(json.dumps(store.review_evidence(args.task_id)))
         elif args.command == "runtime" and args.runtime_command == "authorize":

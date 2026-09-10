@@ -22,7 +22,7 @@ CAPABILITIES = frozenset({
     "filesystem.read", "filesystem.write", "shell.execute", "git.worktree_create", "git.commit", "git.integrate", "git.cherry_pick_abort", "git.push",
     "browser.observe", "browser.navigate", "browser.reload_tab", "browser.reload_extension",
     "browser.restart", "app.observe", "app.mutate", "provider.preflight",
-    "provider.free_submit", "provider.paid_submit", "destructive.delete", "external.publish",
+    "provider.free_submit", "provider.paid_submit", "destructive.delete", "external.publish", "dependency.install",
 })
 
 

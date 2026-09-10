@@ -4,6 +4,7 @@ import subprocess
 import os
 import signal
 import json
+import select
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -37,7 +38,7 @@ class WorkerResult:
 
 
 def parse_usage(output: str) -> dict:
-    """Best-effort provider JSONL usage extraction; unknown fields are ignored."""
+    """Parse JSONL usage while preserving event-vs-cumulative semantics."""
     totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
     found = False
     for line in output.splitlines():
@@ -46,9 +47,11 @@ def parse_usage(output: str) -> dict:
         usage = event.get("usage") or event.get("token_usage")
         if not isinstance(usage, dict): continue
         found = True
+        cumulative = bool(event.get("cumulative") or usage.get("cumulative"))
         for key in totals:
             value = usage.get(key)
-            if isinstance(value, int): totals[key] += value
+            if isinstance(value, int):
+                totals[key] = max(totals[key], value) if cumulative else totals[key] + value
     return totals if found else {}
 
 
@@ -82,9 +85,11 @@ class ProviderAdapter:
             command = self.command(_packet_prompt(prompt, context_packet), profile)
         except TypeError:
             command = self.command(prompt)
-        return ManagedRun(subprocess.Popen(command, cwd=cwd, text=True,
+        managed = ManagedRun(subprocess.Popen(command, cwd=cwd, text=True,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                            stdin=subprocess.DEVNULL, env=_provider_env(), start_new_session=True), self, cwd)
+        managed.hard_input_tokens = getattr(profile.context, "hard_input_tokens", None) if profile else None
+        return managed
 
     def resume(self, session_id: str, prompt: str, cwd: Path) -> "ManagedRun":
         raise NotImplementedError(f"{self.name} does not support session resume")
@@ -96,6 +101,7 @@ class ManagedRun:
         self.adapter = adapter
         self.cwd = Path(cwd or ".")
         self.session_id = f"pid:{process.pid}"
+        self.hard_input_tokens: int | None = None
 
     def pause(self) -> None:
         if self.process.poll() is None: self._signal(signal.SIGSTOP)
@@ -113,6 +119,8 @@ class ManagedRun:
             pass
 
     def wait(self, timeout: float | None = None) -> WorkerResult:
+        if self.hard_input_tokens is not None and self.process.stdout is not None:
+            return self._wait_stream(timeout)
         try:
             output, _ = self.process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -128,6 +136,26 @@ class ManagedRun:
         exit_code = self.process.returncode if self.process.returncode is not None else 0
         return WorkerResult(exit_code, text_output, self.session_id,
                             parse_usage(text_output), classify_failure(exit_code, text_output))
+
+    def _wait_stream(self, timeout: float | None = None) -> WorkerResult:
+        started = __import__("time").monotonic(); lines = []; denied = False
+        while self.process.poll() is None:
+            if timeout is not None and __import__("time").monotonic() - started > timeout:
+                self._signal(signal.SIGKILL); break
+            ready, _, _ = select.select([self.process.stdout], [], [], 0.05)
+            if not ready: continue
+            line = self.process.stdout.readline()
+            if not line: continue
+            lines.append(line)
+            usage = parse_usage(line)
+            if usage.get("input_tokens", 0) > self.hard_input_tokens:
+                denied = True; self._signal(signal.SIGKILL); break
+        tail, _ = self.process.communicate()
+        if tail: lines.append(tail)
+        output = "".join(lines)
+        if denied: output += "\nhard cumulative input budget exceeded\n"
+        exit_code = self.process.returncode if self.process.returncode is not None else 137
+        return WorkerResult(exit_code, output, self.session_id, parse_usage(output), "hard_budget_denied" if denied else classify_failure(exit_code, output))
 
 
 class CodexAdapter(ProviderAdapter):

@@ -9,6 +9,7 @@ class ContextPolicy:
     max_input_tokens: int | None = 12000
     allowed_paths: tuple[str, ...] = field(default_factory=tuple)
     max_output_bytes: int = 1_000_000
+    hard_input_tokens: int | None = None
 
 @dataclass(frozen=True)
 class ExecutionProfile:
@@ -25,12 +26,12 @@ def validate_profile(profile: ExecutionProfile) -> None:
     if profile.profile is not None and (not isinstance(profile.profile, str) or not profile.profile.strip()): raise ValueError("invalid provider profile")
     if profile.reasoning_effort not in (None, "low", "medium", "high"): raise ValueError("invalid reasoning_effort")
     if profile.sandbox not in (None, "read-only", "workspace-write", "danger-full-access"): raise ValueError("invalid sandbox")
-    if profile.context.history_limit < 0 or (profile.context.max_input_tokens is not None and profile.context.max_input_tokens <= 0) or profile.context.max_output_bytes <= 0: raise ValueError("invalid context budget")
+    if profile.context.history_limit < 0 or (profile.context.max_input_tokens is not None and profile.context.max_input_tokens <= 0) or profile.context.max_output_bytes <= 0 or (profile.context.hard_input_tokens is not None and profile.context.hard_input_tokens <= 0): raise ValueError("invalid context budget")
     if profile.context.knowledge_mode not in ("none", "summary", "full"): raise ValueError("invalid knowledge_mode")
 
 def profile_from(value: dict[str, Any] | None) -> ExecutionProfile:
     value = value or {}; context = value.get("context") or {}
-    profile = ExecutionProfile(value.get("model"), value.get("profile"), value.get("reasoning_effort"), value.get("sandbox"), ContextPolicy(int(context.get("history_limit", 6)), context.get("knowledge_mode", "summary"), context.get("max_input_tokens", 12000), tuple(context.get("allowed_paths", ())), int(context.get("max_output_bytes", 1_000_000))))
+    profile = ExecutionProfile(value.get("model"), value.get("profile"), value.get("reasoning_effort"), value.get("sandbox"), ContextPolicy(int(context.get("history_limit", 6)), context.get("knowledge_mode", "summary"), context.get("max_input_tokens", 12000), tuple(context.get("allowed_paths", ())), int(context.get("max_output_bytes", 1_000_000)), context.get("hard_input_tokens")))
     validate_profile(profile); return profile
 
 def resolve_profile(project_default=None, worker=None, task_override=None, dispatch_override=None):
