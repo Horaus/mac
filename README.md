@@ -26,6 +26,15 @@ profile, reasoning effort và sandbox riêng. Để trống một mục nếu mu
 cấu hình mặc định của provider. Model chỉ chạy được khi tài khoản/provider hiện
 tại có quyền sử dụng model đó.
 
+##### Có gì mới trong phiên bản 0.4.0
+
+MAC giờ giữ đúng phiên provider khi chuyển sang task tiếp theo, chạy nhiều
+worker đồng thời qua hàng đợi bền vững và tự phục hồi những run bị gián đoạn.
+Giới hạn context được ghi nhận trung thực; run có telemetry trực tiếp có thể bị
+dừng khi vượt hard budget. Tác vụ đọc/audit nhỏ có workspace giới hạn theo
+allowlist, còn dependency đã chuẩn bị sẵn có thể được kiểm tra và dùng lại
+offline thay vì âm thầm tải từ mạng.
+
 ##### Đã thử với Sol và Luna
 
 MAC không chỉ được kiểm tra bằng fixture. Một phiên làm việc thật đã dùng
@@ -199,6 +208,15 @@ In the **Workers** tab, select a worker and press `x` to configure its model,
 Codex profile, reasoning effort, and sandbox. Leave a field blank to inherit
 the provider default. A configured model can run only when the current account
 and provider are entitled to use it.
+
+##### What is new in version 0.4.0
+
+MAC now preserves explicit provider sessions across follow-up tasks, runs
+workers concurrently through a durable queue, and reconciles interrupted runs.
+Context limits are reported honestly, with hard stopping where live provider
+telemetry supports it. Small read/audit jobs can use allowlisted workspaces,
+while pre-provisioned dependencies can be verified and reused offline instead
+of silently fetching from the network.
 
 ##### Tested with Sol and Luna
 
