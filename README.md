@@ -26,14 +26,38 @@ profile, reasoning effort và sandbox riêng. Để trống một mục nếu mu
 cấu hình mặc định của provider. Model chỉ chạy được khi tài khoản/provider hiện
 tại có quyền sử dụng model đó.
 
-##### Có gì mới trong phiên bản 0.4.0
+##### Có gì mới trong phiên bản 0.5.0
 
-MAC giờ giữ đúng phiên provider khi chuyển sang task tiếp theo, chạy nhiều
-worker đồng thời qua hàng đợi bền vững và tự phục hồi những run bị gián đoạn.
-Giới hạn context được ghi nhận trung thực; run có telemetry trực tiếp có thể bị
-dừng khi vượt hard budget. Tác vụ đọc/audit nhỏ có workspace giới hạn theo
-allowlist, còn dependency đã chuẩn bị sẵn có thể được kiểm tra và dùng lại
-offline thay vì âm thầm tải từ mạng.
+MAC giờ phân biệt worker cơ bản và worker chuyên gia. Worker có trí nhớ làm việc
+để tiếp tục một goal, còn Master quyết định nội dung nào đáng tin cậy để đưa vào
+trí nhớ lâu dài. Goal, checkpoint, worker pack và các hành động đang dở được lưu
+bền vững để MAC có thể phục hồi trung thực sau khi hết quota, mất kết nối hoặc
+khởi động lại. Nếu phiên model cũ không nối lại được, MAC sẽ nói rõ thay vì giả
+vờ worker vẫn nhớ.
+
+Phiên bản này cũng thêm đường API miễn phí cho Google Gemini và Cloudflare
+Workers AI. Master chọn provider và chính sách fallback; MAC theo dõi quota,
+request ID và token usage. Secret chỉ được đọc qua tham chiếu tới biến môi
+trường, không được nhận trực tiếp trong task hay lưu vào evidence.
+
+##### Thử API Google và Cloudflare
+
+Đặt secret bằng trình quản lý bí mật hoặc cấu hình shell của máy, rồi export
+tên biến cho tiến trình chạy MAC:
+
+    export GOOGLE_API_KEY
+    export CLOUDFLARE_API_TOKEN
+
+Sau đó yêu cầu Master đăng ký tham chiếu `env://GOOGLE_API_KEY` hoặc
+`env://CLOUDFLARE_API_TOKEN` bằng tool `org_register_credential_ref`, cấu hình
+free routing, rồi gọi `org_free_route`. Không gửi API key vào prompt hoặc tham
+số MCP. MAC từ chối secret thô, paid routing và fixture data trên đường
+production.
+
+HTTP adapter, cách đọc usage, lỗi quota/429, fallback và recovery đã được kiểm
+thử trên máy phát hành bằng response có cấu trúc như production. Lệnh gọi bằng
+credential thật được dành cho người cài đặt chủ động thử vì MAC không lưu secret
+của người dùng.
 
 ##### Đã thử với Sol và Luna
 
@@ -45,9 +69,9 @@ với file gốc rồi mới quyết định chấp nhận. MAC cũng lưu outpu
 thread ID và lịch sử run để Master có thể retry, cancel hoặc validate.
 
 Đây là cách MAC được thiết kế để làm việc: worker tập trung thực hiện phần việc
-được giao, còn Master giữ quyền kiểm tra và quyết định cuối cùng. Tích hợp
-Gemini vẫn có sẵn, nhưng chưa thể chạy kiểm thử tương đương trong môi trường
-phát hành hiện tại vì giới hạn từ phía nhà phát hành.
+được giao, còn Master giữ quyền kiểm tra và quyết định cuối cùng. Luồng
+Sol–Luna ở trên là kiểm thử CLI thật. Google Gemini và Cloudflare là đường API
+riêng; chưa dùng tài khoản hoặc quota thật của người phát hành.
 
 ##### Hệ điều hành được hỗ trợ
 
@@ -209,14 +233,38 @@ Codex profile, reasoning effort, and sandbox. Leave a field blank to inherit
 the provider default. A configured model can run only when the current account
 and provider are entitled to use it.
 
-##### What is new in version 0.4.0
+##### What is new in version 0.5.0
 
-MAC now preserves explicit provider sessions across follow-up tasks, runs
-workers concurrently through a durable queue, and reconciles interrupted runs.
-Context limits are reported honestly, with hard stopping where live provider
-telemetry supports it. Small read/audit jobs can use allowlisted workspaces,
-while pre-provisioned dependencies can be verified and reused offline instead
-of silently fetching from the network.
+MAC now distinguishes basic workers from specialists. Workers retain durable
+working memory for an active goal, while the Master decides what trusted
+knowledge should become long-term memory. Goals, checkpoints, worker packs,
+and interrupted actions can be recovered after quota exhaustion, disconnects,
+or restarts. If the original provider session cannot be resumed, MAC discloses
+that fact instead of pretending the worker still remembers it.
+
+Version 0.5.0 also adds free-tier API routing for Google Gemini and Cloudflare
+Workers AI. The Master owns provider selection and fallback policy; MAC records
+quota classification, request IDs, and token usage. Secrets are resolved from
+environment references and are never accepted as task or MCP payload values.
+
+##### Trying the Google and Cloudflare APIs
+
+Set the values through the machine's secret manager or shell configuration,
+then export the variable names to the process that runs MAC:
+
+    export GOOGLE_API_KEY
+    export CLOUDFLARE_API_TOKEN
+
+Ask the Master to register `env://GOOGLE_API_KEY` or
+`env://CLOUDFLARE_API_TOKEN` with `org_register_credential_ref`, configure the
+free routing policy, and call `org_free_route`. Never paste an API key into a
+prompt or MCP argument. MAC rejects raw secrets, paid routing, and fixture data
+on the production path.
+
+The HTTP adapters, production-shaped usage parsing, quota/429 handling,
+fallback, and recovery paths were tested locally. A call using the installer's
+own live credentials remains an explicit opt-in test because MAC does not ship
+or retain user credentials.
 
 ##### Tested with Sol and Luna
 
@@ -229,9 +277,9 @@ the output, token usage, thread ID, and run history so the Master could retry,
 cancel, validate, or accept the work.
 
 That is the intended working relationship: the worker focuses on its assigned
-job while the Master keeps final review authority. Gemini integration remains
-available, but an equivalent runtime test could not be run in the current
-release environment because of publisher-side restrictions.
+job while the Master keeps final review authority. The Sol–Luna result above is
+a real CLI test. Google Gemini and Cloudflare use a separate API path; no
+publisher account or live quota was used for the release tests.
 
 ##### Supported operating systems
 

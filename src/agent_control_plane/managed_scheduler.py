@@ -66,15 +66,17 @@ class ManagedScheduler:
             if job.lifecycle == "live" and live_callback is not None:
                 live_callback(row["id"], job)
             else:
-                self.store.mark_managed_finished(row["id"], "RECOVERED")
-                self.submit(job)
+                result = self.submit(job)
+                # The old durable row is an attempted dispatch, not the new
+                # queue entry created when admission is still unavailable.
+                self.store.mark_managed_finished(row["id"], "RECOVERED" if result["status"] == "STARTED" else "REQUEUED")
             recovered += 1
         return recovered
 
     def submit(self, job: ManagedJob):
         for resource, mode in job.resources:
             if not self.store.acquire(resource, job.task_id, job.worker_id, mode):
-                queue_id = self.store.enqueue_managed(job.task_id, job.worker_id, job.adapter.name, f"lease unavailable: {resource}")
+                queue_id = self.store.enqueue_managed(job.task_id, job.worker_id, job.adapter.name, f"lease unavailable: {resource}", self._payload(job))
                 self.store.set_task_status(job.task_id, "WAITING_RESOURCE")
                 return {"status": "QUEUED", "queue_id": queue_id, "reason": f"lease unavailable: {resource}"}
         if self._active >= self.max_workers:

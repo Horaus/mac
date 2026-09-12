@@ -10,12 +10,198 @@ from pathlib import Path
 from typing import Any
 
 
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.RLock:
+    key = str(path.resolve())
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.RLock())
+
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL,
-  provider TEXT, worker_id TEXT, base_commit TEXT, execution_json TEXT NOT NULL DEFAULT '{}', resource_versions TEXT NOT NULL DEFAULT '{}',
+  provider TEXT, worker_id TEXT, base_commit TEXT, goal_id TEXT, execution_json TEXT NOT NULL DEFAULT '{}', resource_versions TEXT NOT NULL DEFAULT '{}',
   created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goals (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL,
+  specialist_id TEXT, inspection_mode TEXT NOT NULL DEFAULT 'result_only',
+  acceptance_json TEXT NOT NULL DEFAULT '[]', checkpoint_policy_json TEXT NOT NULL DEFAULT '{}',
+  worker_profile_json TEXT NOT NULL DEFAULT '{}', worker_pack_id TEXT, permissions_json TEXT NOT NULL DEFAULT '[]',
+  version INTEGER NOT NULL DEFAULT 1, digest TEXT NOT NULL, source TEXT NOT NULL,
+  owner TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_archetypes (
+  id TEXT NOT NULL, version INTEGER NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL,
+  taxonomy_json TEXT NOT NULL DEFAULT '[]', skills_json TEXT NOT NULL DEFAULT '[]', rules_json TEXT NOT NULL DEFAULT '[]',
+  memory_namespace TEXT NOT NULL, tool_policy_json TEXT NOT NULL DEFAULT '{}', risk_class TEXT NOT NULL,
+  checkpoint_policy_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
+  digest TEXT NOT NULL, source TEXT NOT NULL, owner TEXT NOT NULL, created_at REAL NOT NULL,
+  PRIMARY KEY(id, version)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_archetype_version
+BEFORE UPDATE OF id, version, name, role, taxonomy_json, skills_json, rules_json, memory_namespace, tool_policy_json, risk_class, checkpoint_policy_json, digest, source, owner, created_at ON agent_archetypes BEGIN SELECT RAISE(ABORT, 'archetype versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_archetype_delete
+BEFORE DELETE ON agent_archetypes BEGIN SELECT RAISE(ABORT, 'archetype versions are append-only'); END;
+CREATE TABLE IF NOT EXISTS agent_instances (
+  id TEXT PRIMARY KEY, archetype_id TEXT NOT NULL, archetype_version INTEGER NOT NULL,
+  status TEXT NOT NULL, memory_namespace TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+  FOREIGN KEY(archetype_id, archetype_version) REFERENCES agent_archetypes(id, version)
+);
+CREATE TABLE IF NOT EXISTS model_profiles (
+  id TEXT PRIMARY KEY, provider TEXT NOT NULL, runtime TEXT NOT NULL, model TEXT NOT NULL,
+  baseline_json TEXT NOT NULL DEFAULT '{}', compatibility_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1, digest TEXT NOT NULL, source TEXT NOT NULL, owner TEXT NOT NULL, created_at REAL NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_model_profile_provenance
+BEFORE UPDATE OF id, provider, runtime, model, baseline_json, compatibility_json, routing_json, version, digest, source, owner, created_at ON model_profiles
+BEGIN SELECT RAISE(ABORT, 'model profile provenance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_model_profile_delete
+BEFORE DELETE ON model_profiles BEGIN SELECT RAISE(ABORT, 'model profiles are append-only'); END;
+CREATE TABLE IF NOT EXISTS skill_versions (
+  id TEXT NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL, digest TEXT NOT NULL,
+  provenance TEXT NOT NULL, trust_status TEXT NOT NULL, compatible_models_json TEXT NOT NULL DEFAULT '[]',
+  required_tools_json TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL, owner TEXT NOT NULL, created_at REAL NOT NULL,
+  PRIMARY KEY(id, version)
+);
+CREATE TABLE IF NOT EXISTS rule_versions (
+  id TEXT NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL, digest TEXT NOT NULL,
+  provenance TEXT NOT NULL, trust_status TEXT NOT NULL, source TEXT NOT NULL, owner TEXT NOT NULL, created_at REAL NOT NULL,
+  conflicts_json TEXT NOT NULL DEFAULT '[]', precedence TEXT NOT NULL DEFAULT 'project',
+  PRIMARY KEY(id, version)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_skill_version_provenance
+BEFORE UPDATE OF id, version, content, digest, provenance, trust_status, compatible_models_json, required_tools_json, source, owner, created_at ON skill_versions
+BEGIN SELECT RAISE(ABORT, 'skill version provenance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_skill_version_delete
+BEFORE DELETE ON skill_versions BEGIN SELECT RAISE(ABORT, 'skill versions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_rule_version_provenance
+BEFORE UPDATE OF id, version, content, digest, provenance, trust_status, source, owner, created_at, conflicts_json, precedence ON rule_versions
+BEGIN SELECT RAISE(ABORT, 'rule version provenance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_rule_version_delete
+BEFORE DELETE ON rule_versions BEGIN SELECT RAISE(ABORT, 'rule versions are append-only'); END;
+CREATE TABLE IF NOT EXISTS worker_packs (
+  id TEXT PRIMARY KEY, goal_id TEXT, archetype_id TEXT, archetype_version INTEGER,
+  model_profile_id TEXT, components_json TEXT NOT NULL, digest TEXT NOT NULL, version INTEGER NOT NULL,
+  source TEXT NOT NULL, owner TEXT NOT NULL, created_at REAL NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_worker_pack
+BEFORE UPDATE ON worker_packs BEGIN SELECT RAISE(ABORT, 'worker packs are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_worker_pack_delete
+BEFORE DELETE ON worker_packs BEGIN SELECT RAISE(ABORT, 'worker packs are append-only'); END;
+CREATE TABLE IF NOT EXISTS memory_items (
+  id TEXT PRIMARY KEY, namespace TEXT NOT NULL, scope TEXT NOT NULL, kind TEXT NOT NULL,
+  content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'WORKING', version INTEGER NOT NULL DEFAULT 1,
+  digest TEXT NOT NULL, source TEXT NOT NULL, owner TEXT NOT NULL, expires_at REAL, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_promotions (
+  id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, target_scope TEXT NOT NULL, decision TEXT NOT NULL,
+  decided_by TEXT NOT NULL, created_at REAL NOT NULL, FOREIGN KEY(memory_id) REFERENCES memory_items(id)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_memory_provenance
+BEFORE UPDATE OF namespace, scope, kind, content, version, digest, source, owner, created_at ON memory_items
+WHEN NEW.namespace IS NOT OLD.namespace OR NEW.scope IS NOT OLD.scope OR NEW.kind IS NOT OLD.kind
+  OR NEW.content IS NOT OLD.content OR NEW.version IS NOT OLD.version OR NEW.digest IS NOT OLD.digest
+  OR NEW.source IS NOT OLD.source OR NEW.owner IS NOT OLD.owner OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'memory provenance is immutable'); END;
+CREATE TABLE IF NOT EXISTS performance_observations (
+  id TEXT PRIMARY KEY, agent_id TEXT, model_profile_id TEXT, task_id TEXT, taxonomy TEXT NOT NULL,
+  outcome TEXT NOT NULL, payload_json TEXT NOT NULL, sample_group TEXT NOT NULL, digest TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS append_only_performance_observations_update
+BEFORE UPDATE ON performance_observations BEGIN SELECT RAISE(ABORT, 'performance observations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS append_only_performance_observations_delete
+BEFORE DELETE ON performance_observations BEGIN SELECT RAISE(ABORT, 'performance observations are append-only'); END;
+CREATE TABLE IF NOT EXISTS checkpoints (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, sequence INTEGER NOT NULL, state_json TEXT NOT NULL,
+  evidence_json TEXT NOT NULL, next_action TEXT NOT NULL, recoverability TEXT NOT NULL,
+  digest TEXT NOT NULL, source TEXT NOT NULL, owner TEXT NOT NULL, created_at REAL NOT NULL,
+  FOREIGN KEY(goal_id) REFERENCES goals(id)
+);
+CREATE TABLE IF NOT EXISTS goal_events (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
+  sequence INTEGER NOT NULL, created_at REAL NOT NULL, FOREIGN KEY(goal_id) REFERENCES goals(id)
+);
+CREATE TABLE IF NOT EXISTS inspection_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id TEXT NOT NULL REFERENCES goals(id),
+  previous_mode TEXT NOT NULL, new_mode TEXT NOT NULL, actor TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goal_feedback (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id),
+  kind TEXT NOT NULL, content TEXT NOT NULL, actor TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS evidence_objects (
+  id TEXT PRIMARY KEY, goal_id TEXT, run_id TEXT, kind TEXT NOT NULL, metadata_json TEXT NOT NULL,
+  artifact_path TEXT, digest TEXT NOT NULL, owner TEXT NOT NULL, retention TEXT NOT NULL DEFAULT 'transient',
+  legal_hold INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL,
+  FOREIGN KEY(goal_id) REFERENCES goals(id)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_evidence_provenance
+BEFORE UPDATE OF id, goal_id, run_id, kind, metadata_json, artifact_path, digest, owner, created_at ON evidence_objects
+BEGIN SELECT RAISE(ABORT, 'evidence provenance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_evidence_delete
+BEFORE DELETE ON evidence_objects BEGIN SELECT RAISE(ABORT, 'evidence objects are append-only'); END;
+CREATE TABLE IF NOT EXISTS goal_subscribers (
+  goal_id TEXT NOT NULL, subscriber_id TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0,
+  acknowledged_sequence INTEGER NOT NULL DEFAULT 0, event_types_json TEXT NOT NULL DEFAULT '[]',
+  created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(goal_id, subscriber_id),
+  FOREIGN KEY(goal_id) REFERENCES goals(id)
+);
+CREATE TABLE IF NOT EXISTS api_quota_ledgers (
+  id TEXT PRIMARY KEY, provider TEXT NOT NULL, account_ref TEXT NOT NULL, model TEXT NOT NULL,
+  project_id TEXT NOT NULL DEFAULT '', window TEXT NOT NULL, used_json TEXT NOT NULL, limit_json TEXT NOT NULL, reset_at REAL,
+  confidence TEXT NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_credentials (
+  provider TEXT NOT NULL, account_ref TEXT NOT NULL, secret_ref TEXT NOT NULL,
+  fingerprint TEXT NOT NULL, source TEXT NOT NULL, created_at REAL NOT NULL,
+  PRIMARY KEY(provider, account_ref)
+);
+CREATE TABLE IF NOT EXISTS provider_route_results (
+  idempotency_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+  result_json TEXT NOT NULL, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_request_events (
+  id TEXT PRIMARY KEY, idempotency_key TEXT, attempt_index INTEGER NOT NULL,
+  provider TEXT NOT NULL, model TEXT NOT NULL, classification TEXT NOT NULL,
+  request_id TEXT, headers_json TEXT NOT NULL, usage_json TEXT NOT NULL,
+  retry_after REAL, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS free_routing_policy (
+  id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0,
+  providers_json TEXT NOT NULL DEFAULT '[]', owner TEXT NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_eligibility (
+  provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+  source TEXT NOT NULL, owner TEXT NOT NULL, updated_at REAL NOT NULL,
+  PRIMARY KEY(provider, model)
+);
+CREATE TABLE IF NOT EXISTS budget_telemetry (
+  id TEXT PRIMARY KEY, run_id TEXT, task_id TEXT, source TEXT NOT NULL,
+  metrics_json TEXT NOT NULL, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS daemon_state (
+  id INTEGER PRIMARY KEY CHECK(id=1), instance_id TEXT NOT NULL, mode TEXT NOT NULL,
+  status TEXT NOT NULL, last_tick REAL NOT NULL, degraded_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS interrupted_actions (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+  phase TEXT NOT NULL, classification TEXT NOT NULL, payload_json TEXT NOT NULL,
+  reconciled INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+  FOREIGN KEY(goal_id) REFERENCES goals(id)
+);
+CREATE TABLE IF NOT EXISTS evidence_access_audit (
+  id TEXT PRIMARY KEY, evidence_id TEXT NOT NULL, goal_id TEXT NOT NULL,
+  requester TEXT NOT NULL, mode TEXT NOT NULL, allowed INTEGER NOT NULL,
+  reason TEXT NOT NULL, created_at REAL NOT NULL,
+  FOREIGN KEY(evidence_id) REFERENCES evidence_objects(id), FOREIGN KEY(goal_id) REFERENCES goals(id)
 );
 CREATE TABLE IF NOT EXISTS dependencies (
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -190,7 +376,9 @@ class Store:
         # short transactions while WAL improves reader/writer coexistence.
         self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         self._reconcile_lock = threading.Lock()
-        self._queue_lock = threading.Lock()
+        # All Store connections for one durable state share the same lock;
+        # per-connection locks do not protect concurrent MCP waiters.
+        self._queue_lock = _path_lock(self.path)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
@@ -199,10 +387,115 @@ class Store:
         if "payload_json" not in columns:
             self.db.execute("ALTER TABLE managed_queue ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'" )
             self.db.commit()
+        evidence_columns = {row[1] for row in self.db.execute("PRAGMA table_info(evidence_objects)")}
+        for name, definition in (("retention", "TEXT NOT NULL DEFAULT 'transient'"), ("legal_hold", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("last_accessed_at", "REAL"), ("tombstoned_at", "REAL"), ("tombstone_reason", "TEXT")):
+            if name not in evidence_columns:
+                self.db.execute(f"ALTER TABLE evidence_objects ADD COLUMN {name} {definition}")
+        self.db.commit()
+        chat_columns = {row[1] for row in self.db.execute("PRAGMA table_info(chat_history)")}
+        for name, definition in (("last_accessed_at", "REAL"), ("tombstoned_at", "REAL"), ("tombstone_reason", "TEXT")):
+            if name not in chat_columns:
+                self.db.execute(f"ALTER TABLE chat_history ADD COLUMN {name} {definition}")
+        self.db.commit()
+        skill_columns = {row[1] for row in self.db.execute("PRAGMA table_info(skill_versions)")}
+        for name, definition in (("required_docs_json", "TEXT NOT NULL DEFAULT '[]'"), ("discover_on_demand", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in skill_columns:
+                self.db.execute(f"ALTER TABLE skill_versions ADD COLUMN {name} {definition}")
+        self.db.commit()
+        self.db.execute("""CREATE TRIGGER IF NOT EXISTS immutable_run_archetype_provenance
+            BEFORE UPDATE OF archetype_id, archetype_version ON runs
+            WHEN OLD.archetype_id IS NOT NULL AND (NEW.archetype_id IS NOT OLD.archetype_id OR NEW.archetype_version IS NOT OLD.archetype_version)
+            BEGIN SELECT RAISE(ABORT, 'run archetype provenance is immutable'); END;""")
+        self.db.commit()
+        self.db.executescript("""
+        CREATE TRIGGER IF NOT EXISTS append_only_checkpoints_update
+        BEFORE UPDATE ON checkpoints BEGIN SELECT RAISE(ABORT, 'checkpoints are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS append_only_checkpoints_delete
+        BEFORE DELETE ON checkpoints BEGIN SELECT RAISE(ABORT, 'checkpoints are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS append_only_goal_events_update
+        BEFORE UPDATE ON goal_events BEGIN SELECT RAISE(ABORT, 'goal events are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS append_only_goal_events_delete
+        BEFORE DELETE ON goal_events BEGIN SELECT RAISE(ABORT, 'goal events are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS task_goal_reference_insert
+        BEFORE INSERT ON tasks
+        WHEN NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM goals WHERE id=NEW.goal_id)
+        BEGIN SELECT RAISE(ABORT, 'task goal reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS task_goal_reference_update
+        BEFORE UPDATE OF goal_id ON tasks
+        WHEN NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM goals WHERE id=NEW.goal_id)
+        BEGIN SELECT RAISE(ABORT, 'task goal reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS worker_pack_goal_reference_insert
+        BEFORE INSERT ON worker_packs
+        WHEN NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM goals WHERE id=NEW.goal_id)
+        BEGIN SELECT RAISE(ABORT, 'worker pack goal reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS worker_pack_archetype_reference_insert
+        BEFORE INSERT ON worker_packs
+        WHEN NEW.archetype_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_archetypes WHERE id=NEW.archetype_id AND version=NEW.archetype_version)
+        BEGIN SELECT RAISE(ABORT, 'worker pack archetype reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS worker_pack_scope_update
+        BEFORE UPDATE OF goal_id, archetype_id, archetype_version ON worker_packs
+        WHEN (NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM goals WHERE id=NEW.goal_id))
+          OR (NEW.archetype_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_archetypes WHERE id=NEW.archetype_id AND version=NEW.archetype_version))
+        BEGIN SELECT RAISE(ABORT, 'worker pack scope reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS performance_task_reference_insert
+        BEFORE INSERT ON performance_observations
+        WHEN NEW.task_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id)
+        BEGIN SELECT RAISE(ABORT, 'performance task reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS performance_model_reference_insert
+        BEFORE INSERT ON performance_observations
+        WHEN NEW.model_profile_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM model_profiles WHERE id=NEW.model_profile_id)
+        BEGIN SELECT RAISE(ABORT, 'performance model reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS performance_scope_update
+        BEFORE UPDATE OF task_id, model_profile_id ON performance_observations
+        WHEN (NEW.task_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id))
+          OR (NEW.model_profile_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM model_profiles WHERE id=NEW.model_profile_id))
+        BEGIN SELECT RAISE(ABORT, 'performance scope reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS evidence_goal_reference_insert
+        BEFORE INSERT ON evidence_objects
+        WHEN NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM goals WHERE id=NEW.goal_id)
+        BEGIN SELECT RAISE(ABORT, 'evidence goal reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS evidence_run_reference_insert
+        BEFORE INSERT ON evidence_objects
+        WHEN NEW.run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runs WHERE id=NEW.run_id)
+        BEGIN SELECT RAISE(ABORT, 'evidence run reference does not exist'); END;
+        CREATE TRIGGER IF NOT EXISTS evidence_run_goal_scope_insert
+        BEFORE INSERT ON evidence_objects
+        WHEN NEW.run_id IS NOT NULL AND NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.id=NEW.run_id AND t.goal_id=NEW.goal_id)
+        BEGIN SELECT RAISE(ABORT, 'evidence run and goal scope mismatch'); END;
+        CREATE TRIGGER IF NOT EXISTS evidence_scope_update
+        BEFORE UPDATE OF goal_id, run_id ON evidence_objects
+        WHEN (NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM goals WHERE id=NEW.goal_id))
+          OR (NEW.run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runs WHERE id=NEW.run_id))
+          OR (NEW.run_id IS NOT NULL AND NEW.goal_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.id=NEW.run_id AND t.goal_id=NEW.goal_id))
+        BEGIN SELECT RAISE(ABORT, 'evidence scope reference does not exist'); END;
+        """)
+        self.db.commit()
+        model_columns = {row[1] for row in self.db.execute("PRAGMA table_info(model_profiles)")}
+        if "routing_json" not in model_columns:
+            self.db.execute("ALTER TABLE model_profiles ADD COLUMN routing_json TEXT NOT NULL DEFAULT '{}'")
+        self.db.commit()
+        goal_columns = {row[1] for row in self.db.execute("PRAGMA table_info(goals)")}
+        for name, definition in (("worker_profile_json", "TEXT NOT NULL DEFAULT '{}'"), ("worker_pack_id", "TEXT"), ("permissions_json", "TEXT NOT NULL DEFAULT '[]'"), ("archetype_id", "TEXT"), ("archetype_version", "INTEGER"), ("worker_class", "TEXT NOT NULL DEFAULT 'basic'")):
+            if name not in goal_columns:
+                self.db.execute(f"ALTER TABLE goals ADD COLUMN {name} {definition}")
+        self.db.execute("UPDATE goals SET worker_class='specialist' WHERE worker_class='basic' AND (specialist_id IS NOT NULL OR archetype_id IS NOT NULL)")
+        self.db.commit()
+        memory_columns = {row[1] for row in self.db.execute("PRAGMA table_info(memory_items)")}
+        for name, definition in (("metadata_json", "TEXT NOT NULL DEFAULT '{}'"), ("last_accessed_at", "REAL"), ("tombstoned_at", "REAL"), ("tombstone_reason", "TEXT")):
+            if name not in memory_columns:
+                self.db.execute(f"ALTER TABLE memory_items ADD COLUMN {name} {definition}")
+        self.db.commit()
+        rule_columns = {row[1] for row in self.db.execute("PRAGMA table_info(rule_versions)")}
+        for name, definition in (("conflicts_json", "TEXT NOT NULL DEFAULT '[]'"), ("precedence", "TEXT NOT NULL DEFAULT 'project'")):
+            if name not in rule_columns:
+                self.db.execute(f"ALTER TABLE rule_versions ADD COLUMN {name} {definition}")
+        self.db.commit()
         # Additive migrations keep existing SQLite state usable.
         task_columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
-        if "execution_json" not in task_columns:
-            self.db.execute("ALTER TABLE tasks ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
+        for name, definition in (("execution_json", "TEXT NOT NULL DEFAULT '{}'"), ("goal_id", "TEXT")):
+            if name not in task_columns:
+                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(runs)")}
         for name, definition in (("conversation_id", "TEXT"), ("provider_session_id", "TEXT"), ("resume_session_id", "TEXT"), ("context_checkpoint", "TEXT"),
                                  ("host_instance_id", "TEXT"), ("owner_pid", "INTEGER"), ("process_start_identity", "TEXT"), ("heartbeat_deadline", "REAL"),
@@ -213,6 +506,7 @@ class Store:
                                  ("tool_output_bytes", "INTEGER NOT NULL DEFAULT 0"), ("files_read", "INTEGER NOT NULL DEFAULT 0"),
                                  ("file_bytes", "INTEGER NOT NULL DEFAULT 0"), ("prompt_bytes", "INTEGER NOT NULL DEFAULT 0"),
                                  ("model_turns", "INTEGER NOT NULL DEFAULT 0"), ("wall_time_ms", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("archetype_id", "TEXT"), ("archetype_version", "INTEGER"),
                                  ("commands_executed", "INTEGER NOT NULL DEFAULT 0"), ("soft_budget_exceeded", "INTEGER NOT NULL DEFAULT 0"),
                                  ("heartbeat_at", "REAL"), ("action_count", "INTEGER NOT NULL DEFAULT 0"), ("steering_json", "TEXT NOT NULL DEFAULT '[]'")):
             if name not in columns:
@@ -221,6 +515,10 @@ class Store:
         for name in ("run_id", "task_id"):
             if name not in approval_columns:
                 self.db.execute(f"ALTER TABLE approvals ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+        self.db.commit()
+        quota_columns = {row[1] for row in self.db.execute("PRAGMA table_info(api_quota_ledgers)")}
+        if "project_id" not in quota_columns:
+            self.db.execute("ALTER TABLE api_quota_ledgers ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     def close(self) -> None:
@@ -346,7 +644,7 @@ class Store:
     def _now(self) -> float:
         return time.time()
 
-    def add_task(self, task_id: str, title: str, provider: str | None = None, depends_on=(), execution=None) -> None:
+    def add_task(self, task_id: str, title: str, provider: str | None = None, depends_on=(), execution=None, goal_id: str | None = None) -> None:
         depends_on = list(depends_on)
         if not task_id or not title:
             raise ValueError("task id and title are required")
@@ -358,10 +656,17 @@ class Store:
         if missing:
             raise ValueError(f"unknown task dependencies: {', '.join(missing)}")
         now = self._now()
-        self.db.execute("INSERT INTO tasks(id,title,status,provider,execution_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                        (task_id, title, "READY", provider, json.dumps(execution or {}, sort_keys=True), now, now))
+        if goal_id is not None and not self.db.execute("SELECT 1 FROM goals WHERE id=?", (goal_id,)).fetchone():
+            raise ValueError("unknown goal")
+        self.db.execute("INSERT INTO tasks(id,title,status,provider,goal_id,execution_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (task_id, title, "READY", provider, goal_id, json.dumps(execution or {}, sort_keys=True), now, now))
         for dep in depends_on:
             self.db.execute("INSERT INTO dependencies(task_id,depends_on) VALUES(?,?)", (task_id, dep))
+        self.db.commit()
+
+    def record_run_archetype(self, run_id: str) -> None:
+        """Derive run archetype provenance from persisted task/goal identity."""
+        self.db.execute("UPDATE runs SET archetype_id=(SELECT g.archetype_id FROM tasks t JOIN goals g ON g.id=t.goal_id WHERE t.id=runs.task_id), archetype_version=(SELECT g.archetype_version FROM tasks t JOIN goals g ON g.id=t.goal_id WHERE t.id=runs.task_id) WHERE id=?", (run_id,))
         self.db.commit()
 
     def task(self, task_id: str):
@@ -371,15 +676,16 @@ class Store:
         return self.db.execute("SELECT * FROM tasks ORDER BY created_at").fetchall()
 
     def set_task_status(self, task_id: str, status: str) -> None:
-        if status not in self.TASK_STATUSES:
-            raise ValueError(f"invalid task status: {status}")
-        current = self.task(task_id)
-        if current is None:
-            raise ValueError(f"unknown task: {task_id}")
-        if status != current["status"] and status not in self.TASK_TRANSITIONS[current["status"]]:
-            raise ValueError(f"invalid task transition: {current['status']} -> {status}")
-        self.db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (status, self._now(), task_id))
-        self.db.commit()
+        with self._queue_lock:
+            if status not in self.TASK_STATUSES:
+                raise ValueError(f"invalid task status: {status}")
+            current = self.task(task_id)
+            if current is None:
+                raise ValueError(f"unknown task: {task_id}")
+            if status != current["status"] and status not in self.TASK_TRANSITIONS[current["status"]]:
+                raise ValueError(f"invalid task transition: {current['status']} -> {status}")
+            self.db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (status, self._now(), task_id))
+            self.db.commit()
 
     def claim_task(self, task_id: str, worker_id: str, base_commit: str | None = None) -> None:
         """Atomically claim a runnable task so duplicate dispatch cannot execute it."""
@@ -564,8 +870,9 @@ class Store:
         self.set_task_status(task_id, "READY" if self.dependencies_ready(task_id) else "WAITING_DEPENDENCY")
 
     def release_task_leases(self, task_id: str) -> None:
-        self.db.execute("DELETE FROM leases WHERE task_id=?", (task_id,))
-        self.db.commit()
+        with self._queue_lock:
+            self.db.execute("DELETE FROM leases WHERE task_id=?", (task_id,))
+            self.db.commit()
 
     def retry_task(self, task_id: str, worker_id: str | None = None) -> None:
         task = self.task(task_id)
@@ -585,8 +892,11 @@ class Store:
             raise ValueError(f"unknown task: {task_id}")
         if task["status"] in ("ACCEPTED", "DONE"):
             raise ValueError(f"task {task_id} is already complete")
-        if task["status"] != "FAILED":
-            self.set_task_status(task_id, "FAILED")
+        with self._queue_lock:
+            if task["status"] != "FAILED":
+                self.set_task_status(task_id, "FAILED")
+            self.db.execute("UPDATE managed_queue SET status='CANCELLED',finished_at=? WHERE task_id=? AND status IN ('QUEUED','STARTED')", (self._now(), task_id))
+            self.db.commit()
         self.release_task_leases(task_id)
         self.add_message("INFORMATION", {"action": "cancel", "reason": reason}, task_id=task_id)
 
@@ -722,9 +1032,10 @@ class Store:
         self.db.commit()
 
     def set_worker_status(self, worker_id: str, status: str, session_id: str | None = None) -> None:
-        self.db.execute("UPDATE workers SET status=?,session_id=COALESCE(?,session_id),updated_at=? WHERE id=?",
-                        (status, session_id, self._now(), worker_id))
-        self.db.commit()
+        with self._queue_lock:
+            self.db.execute("UPDATE workers SET status=?,session_id=COALESCE(?,session_id),updated_at=? WHERE id=?",
+                            (status, session_id, self._now(), worker_id))
+            self.db.commit()
 
     def set_task_worker(self, task_id: str, worker_id: str, base_commit: str | None = None) -> None:
         self.db.execute("UPDATE tasks SET worker_id=?,base_commit=COALESCE(?,base_commit),updated_at=? WHERE id=?",
@@ -850,6 +1161,13 @@ class Store:
 
     def finish_run(self, run_id: str, status: str, exit_code: int, output: str, session_id: str | None = None,
                    failure_class: str | None = None, usage: dict | None = None) -> None:
+        # A single Store connection is shared by managed waiters; serialize the
+        # complete read/merge/update/emit transaction, not only commit().
+        with self._queue_lock:
+            self._finish_run_unlocked(run_id, status, exit_code, output, session_id, failure_class, usage)
+
+    def _finish_run_unlocked(self, run_id: str, status: str, exit_code: int, output: str, session_id: str | None = None,
+                   failure_class: str | None = None, usage: dict | None = None) -> None:
         meta = usage or {}
         row = self.db.execute("SELECT effective_budget_json,budget_mode FROM runs WHERE id=?", (run_id,)).fetchone()
         effective = json.loads(row[0] or "{}") if row else {}
@@ -872,11 +1190,12 @@ class Store:
         return self.db.execute("SELECT * FROM runs WHERE task_id=? AND worker_id=? ORDER BY started_at DESC LIMIT 1", (task_id, worker_id)).fetchone()
 
     def heartbeat(self, run_id: str, action: str | None = None, ttl: float = 30.0) -> None:
-        if not self.db.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone(): raise ValueError("unknown run")
-        if ttl <= 0: raise ValueError("heartbeat ttl must be positive")
-        now = self._now()
-        self.db.execute("UPDATE runs SET heartbeat_at=?,heartbeat_deadline=?,action_count=action_count+? WHERE id=?", (now, now + ttl, int(action is not None), run_id))
-        self.db.commit()
+        with self._queue_lock:
+            if not self.db.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone(): raise ValueError("unknown run")
+            if ttl <= 0: raise ValueError("heartbeat ttl must be positive")
+            now = self._now()
+            self.db.execute("UPDATE runs SET heartbeat_at=?,heartbeat_deadline=?,action_count=action_count+? WHERE id=?", (now, now + ttl, int(action is not None), run_id))
+            self.db.commit()
 
     def bind_process_identity(self, run_id: str, host_instance_id: str, pid: int, process_start_identity: str, heartbeat_deadline: float) -> None:
         self.db.execute("UPDATE runs SET host_instance_id=?,owner_pid=?,process_start_identity=?,heartbeat_deadline=? WHERE id=?",
@@ -1009,20 +1328,22 @@ class Store:
             return recovered
 
     def add_message(self, msg_type: str, payload: dict[str, Any], task_id=None, worker_id=None) -> None:
-        self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)",
-                        (msg_type, task_id, worker_id, json.dumps(payload), self._now()))
-        self.db.commit()
+        with self._queue_lock:
+            self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)",
+                            (msg_type, task_id, worker_id, json.dumps(payload), self._now()))
+            self.db.commit()
 
     def inbox(self):
         return self.db.execute("SELECT * FROM messages WHERE acknowledged=0 ORDER BY created_at").fetchall()
 
     def acknowledge_messages(self, ids=()) -> None:
-        ids = list(ids)
-        if ids:
-            self.db.executemany("UPDATE messages SET acknowledged=1 WHERE id=?", ((x,) for x in ids))
-        else:
-            self.db.execute("UPDATE messages SET acknowledged=1 WHERE acknowledged=0")
-        self.db.commit()
+        with self._queue_lock:
+            ids = list(ids)
+            if ids:
+                self.db.executemany("UPDATE messages SET acknowledged=1 WHERE id=?", ((x,) for x in ids))
+            else:
+                self.db.execute("UPDATE messages SET acknowledged=1 WHERE acknowledged=0")
+            self.db.commit()
 
     def add_decision(self, decision_id: str, topic: str, decision: str, reason: str, affected_tasks=()) -> None:
         self.db.execute("INSERT INTO decisions VALUES(?,?,?,?,?,?,?)",

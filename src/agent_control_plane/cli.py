@@ -18,6 +18,14 @@ from .profiles import resolve_profile
 from . import __version__
 from .authority import AuthorityPolicy, ApprovalToken, ExecutionMode, RuntimeReport, digest
 from .service import authorize_runtime_action
+from .organization import (add_evidence, cancel_goal as org_cancel_goal, create_goal as org_create_goal,
+                            follow_up as org_follow_up, record_feedback as org_feedback, get_evidence, poll_goal, subscribe_goal, acknowledge_goal, resume_goal as org_resume_goal,
+                            set_inspection_mode as org_set_inspection, summary as org_summary, inspect_archetype,
+                            set_archetype_enabled, assign_archetype)
+from .organization import recommend_worker
+from .organization_runtime import OrganizationDaemon, configure_free_routing, configure_provider_eligibility, register_credential_ref
+from .organization import garbage_collect_conversation, physically_collect_payloads, record_budget_telemetry
+from .service_fixtures import ProductionServiceManager, SandboxedServiceManager, subprocess_service_executor
 
 def _release_info(root: Path) -> tuple[str, str]:
     try:
@@ -222,7 +230,7 @@ def state_path(project: str) -> Path:
     return Path(project) / ".agent-control-plane" / "state.sqlite3"
 
 
-def main(argv=None) -> int:
+def main(argv=None, _daemon_owner=False) -> int:
     if not (sys.argv[1:] if argv is None else argv): return _menu(os.environ.get("MAC_PROJECT_ROOT", "."))
     parser = argparse.ArgumentParser(prog="acp")
     parser.add_argument("--project", default=os.environ.get("MAC_PROJECT_ROOT", "."))
@@ -299,8 +307,57 @@ def main(argv=None) -> int:
     consume_approval = approval.add_parser("consume")
     for name in ("token-id", "capability", "project-id", "provider-id", "job-id", "run-id", "task-id", "idempotency-key", "payload"):
         consume_approval.add_argument("--" + name, required=True)
+    organization = sub.add_parser("organization").add_subparsers(dest="organization_command", required=True)
+    goal_create = organization.add_parser("goal-create"); goal_create.add_argument("--id", required=True); goal_create.add_argument("--title", required=True); goal_create.add_argument("--owner", default="master"); goal_create.add_argument("--worker-class", choices=("basic", "specialist"), default="basic"); goal_create.add_argument("--specialist-id"); goal_create.add_argument("--inspection-mode", default="result_only")
+    goal_summary = organization.add_parser("goal-summary"); goal_summary.add_argument("goal_id"); goal_summary.add_argument("--cursor", type=int, default=0); goal_summary.add_argument("--limit", type=int, default=20)
+    goal_inspection = organization.add_parser("inspection"); goal_inspection.add_argument("goal_id"); goal_inspection.add_argument("mode"); goal_inspection.add_argument("--actor", default="master")
+    goal_follow = organization.add_parser("follow-up"); goal_follow.add_argument("goal_id"); goal_follow.add_argument("conversation_id"); goal_follow.add_argument("message"); goal_follow.add_argument("--actor", default="master")
+    goal_feedback = organization.add_parser("feedback"); goal_feedback.add_argument("goal_id"); goal_feedback.add_argument("kind", choices=("constraint", "question", "lesson", "redirect")); goal_feedback.add_argument("content"); goal_feedback.add_argument("--actor", default="master")
+    routing = organization.add_parser("free-routing"); routing.add_argument("providers", nargs="+"); routing.add_argument("--disable", action="store_true"); routing.add_argument("--actor", default="master")
+    eligibility = organization.add_parser("provider-eligibility"); eligibility.add_argument("provider"); eligibility.add_argument("model"); eligibility.add_argument("status", choices=("eligible", "ineligible", "unknown")); eligibility.add_argument("--source", default="recorded"); eligibility.add_argument("--actor", default="master")
+    worker_recommend = organization.add_parser("recommend-worker"); worker_recommend.add_argument("--goal", required=True); worker_recommend.add_argument("--risk", choices=("low", "standard", "high", "critical"), default="standard"); worker_recommend.add_argument("--constraints", default="{}")
+    telemetry = organization.add_parser("budget-telemetry"); telemetry.add_argument("--metrics", required=True); telemetry.add_argument("--source", required=True); telemetry.add_argument("--run-id"); telemetry.add_argument("--task-id")
+    payload_gc = organization.add_parser("gc-payloads"); payload_gc.add_argument("--grace-days", type=int, default=7)
+    goal_resume = organization.add_parser("resume"); goal_resume.add_argument("goal_id"); goal_resume.add_argument("--actor", default="master")
+    goal_cancel = organization.add_parser("cancel"); goal_cancel.add_argument("goal_id"); goal_cancel.add_argument("reason"); goal_cancel.add_argument("--actor", default="master")
+    goal_subscribe = organization.add_parser("subscribe"); goal_subscribe.add_argument("goal_id"); goal_subscribe.add_argument("subscriber_id"); goal_subscribe.add_argument("--event-types", nargs="*")
+    goal_poll = organization.add_parser("poll"); goal_poll.add_argument("goal_id"); goal_poll.add_argument("subscriber_id"); goal_poll.add_argument("--limit", type=int, default=20); goal_poll.add_argument("--byte-limit", type=int, default=16384); goal_poll.add_argument("--reconnect", action="store_true")
+    goal_ack = organization.add_parser("ack"); goal_ack.add_argument("goal_id"); goal_ack.add_argument("subscriber_id"); goal_ack.add_argument("sequence", type=int)
+    evidence_get = organization.add_parser("evidence"); evidence_get.add_argument("evidence_id"); evidence_get.add_argument("goal_id"); evidence_get.add_argument("--requester", default="master"); evidence_get.add_argument("--deep", action="store_true"); evidence_get.add_argument("--fields", nargs="*"); evidence_get.add_argument("--byte-limit", type=int, default=16384)
+    archetype_inspect = organization.add_parser("archetype-inspect"); archetype_inspect.add_argument("archetype_id"); archetype_inspect.add_argument("--version", type=int)
+    archetype_enable = organization.add_parser("archetype-enable"); archetype_enable.add_argument("archetype_id"); archetype_enable.add_argument("version", type=int); archetype_enable.add_argument("--actor", default="master")
+    archetype_disable = organization.add_parser("archetype-disable"); archetype_disable.add_argument("archetype_id"); archetype_disable.add_argument("version", type=int); archetype_disable.add_argument("--actor", default="master")
+    archetype_assign = organization.add_parser("archetype-assign"); archetype_assign.add_argument("goal_id"); archetype_assign.add_argument("instance_id"); archetype_assign.add_argument("archetype_id"); archetype_assign.add_argument("version", type=int); archetype_assign.add_argument("--actor", default="master")
+    daemon = organization.add_parser("daemon").add_subparsers(dest="daemon_command", required=True)
+    for command in ("start", "tick", "status", "stop", "service-plan"):
+        daemon.add_parser(command)
+    credential_ref = organization.add_parser("credential-ref")
+    credential_ref.add_argument("--provider", required=True); credential_ref.add_argument("--account-ref", required=True)
+    credential_ref.add_argument("--secret-ref", required=True); credential_ref.add_argument("--fingerprint", required=True)
+    credential_ref.add_argument("--source", default="environment")
+    gc_conversation = organization.add_parser("gc-conversation")
+    gc_conversation.add_argument("--inactivity-days", type=int, default=30)
+    service_fixture = organization.add_parser("service-fixture")
+    service_fixture.add_argument("action", choices=("install", "uninstall", "install-unit", "uninstall-unit")); service_fixture.add_argument("--manager", choices=("launchd", "systemd"), required=True)
+    service_fixture.add_argument("--fixture-root", required=True); service_fixture.add_argument("--state-path"); service_fixture.add_argument("--command", dest="service_command", nargs="*", default=[])
+    service = organization.add_parser("service")
+    service.add_argument("action", choices=("install", "uninstall", "status")); service.add_argument("--manager", choices=("launchd", "systemd"), required=True); service.add_argument("--root", required=True); service.add_argument("--state-path"); service.add_argument("--command", dest="service_command", nargs="*", default=[])
     args = parser.parse_args(argv)
     path = state_path(args.project)
+    if not _daemon_owner:
+        marker = path.parent / "daemon.ipc.json"
+        if marker.exists():
+            from .daemon_ipc import DaemonIPCClient
+            try:
+                socket_path = json.loads(marker.read_text())["socket"]
+                response = DaemonIPCClient(socket_path).call({"method": "cli", "params": {"argv": list(argv or sys.argv[1:])}})
+                if not response.get("ok"):
+                    raise RuntimeError(response.get("error", "daemon CLI request failed"))
+                output = response["result"].get("stdout", "")
+                if output: print(output, end="")
+                return int(response["result"].get("exit_code", 0))
+            except (OSError, ValueError, KeyError, ConnectionError):
+                raise RuntimeError("daemon IPC owner is unavailable")
     store = Store(path)
     # Startup reconciliation is safe and idempotent; explicit `reconcile`
     # remains available for operators who want the decision list printed.
@@ -409,6 +466,61 @@ def main(argv=None) -> int:
             policy = AuthorityPolicy(capabilities=frozenset({args.capability}))
             store.consume_approval(args.token_id, policy, payload, args.project_id, args.provider_id, args.job_id,
                                    args.idempotency_key, args.run_id, args.task_id); print(json.dumps({"consumed": True}))
+        elif args.command == "organization" and args.organization_command == "goal-create":
+            print(json.dumps(org_create_goal(store, args.id, args.title, args.owner, args.specialist_id, inspection_mode=args.inspection_mode, worker_class=args.worker_class), default=str))
+        elif args.command == "organization" and args.organization_command == "goal-summary":
+            print(json.dumps(org_summary(store, args.goal_id, args.cursor, args.limit), default=str))
+        elif args.command == "organization" and args.organization_command == "inspection":
+            org_set_inspection(store, args.goal_id, args.mode, args.actor); print(json.dumps({"updated": True}))
+        elif args.command == "organization" and args.organization_command == "follow-up":
+            print(json.dumps(org_follow_up(store, args.goal_id, args.conversation_id, args.message, actor=args.actor), default=str))
+        elif args.command == "organization" and args.organization_command == "feedback":
+            print(json.dumps(org_feedback(store, args.goal_id, args.kind, args.content, args.actor), default=str))
+        elif args.command == "organization" and args.organization_command == "free-routing":
+            print(json.dumps(configure_free_routing(store, args.providers, args.actor, not args.disable), default=str))
+        elif args.command == "organization" and args.organization_command == "provider-eligibility":
+            print(json.dumps(configure_provider_eligibility(store, args.provider, args.model, args.status, args.actor, args.source), default=str))
+        elif args.command == "organization" and args.organization_command == "recommend-worker":
+            print(json.dumps(recommend_worker(store, args.goal, args.risk, json.loads(args.constraints)), default=str))
+        elif args.command == "organization" and args.organization_command == "budget-telemetry":
+            print(json.dumps(record_budget_telemetry(store, json.loads(args.metrics), args.source, args.run_id, args.task_id), default=str))
+        elif args.command == "organization" and args.organization_command == "gc-payloads":
+            print(json.dumps(physically_collect_payloads(store, grace_days=args.grace_days), default=str))
+        elif args.command == "organization" and args.organization_command == "resume":
+            print(json.dumps(org_resume_goal(store, args.goal_id, args.actor), default=str))
+        elif args.command == "organization" and args.organization_command == "cancel":
+            print(json.dumps(org_cancel_goal(store, args.goal_id, args.reason, args.actor), default=str))
+        elif args.command == "organization" and args.organization_command == "subscribe":
+            print(json.dumps(subscribe_goal(store, args.goal_id, args.subscriber_id, args.event_types), default=str))
+        elif args.command == "organization" and args.organization_command == "poll":
+            print(json.dumps(poll_goal(store, args.goal_id, args.subscriber_id, args.limit, args.byte_limit, args.reconnect), default=str))
+        elif args.command == "organization" and args.organization_command == "ack":
+            print(json.dumps(acknowledge_goal(store, args.goal_id, args.subscriber_id, args.sequence), default=str))
+        elif args.command == "organization" and args.organization_command == "evidence":
+            print(json.dumps(get_evidence(store, args.evidence_id, args.goal_id, args.requester, args.deep, args.fields, args.byte_limit), default=str))
+        elif args.command == "organization" and args.organization_command == "archetype-inspect":
+            print(json.dumps(inspect_archetype(store, args.archetype_id, args.version), default=str))
+        elif args.command == "organization" and args.organization_command in ("archetype-enable", "archetype-disable"):
+            enabled = args.organization_command == "archetype-enable"
+            print(json.dumps(set_archetype_enabled(store, args.archetype_id, args.version, enabled, args.actor), default=str))
+        elif args.command == "organization" and args.organization_command == "archetype-assign":
+            print(json.dumps(assign_archetype(store, args.goal_id, args.instance_id, args.archetype_id, args.version, args.actor), default=str))
+        elif args.command == "organization" and args.organization_command == "daemon":
+            runtime_daemon = OrganizationDaemon(store, mode="foreground")
+            result = runtime_daemon.start() if args.daemon_command == "start" else runtime_daemon.tick() if args.daemon_command == "tick" else runtime_daemon.stop() if args.daemon_command == "stop" else runtime_daemon.service_plan() if args.daemon_command == "service-plan" else runtime_daemon.health()
+            print(json.dumps(result, default=str))
+        elif args.command == "organization" and args.organization_command == "credential-ref":
+            print(json.dumps(register_credential_ref(store, args.provider, args.account_ref, args.secret_ref, args.fingerprint, args.source), default=str))
+        elif args.command == "organization" and args.organization_command == "gc-conversation":
+            print(json.dumps({"expired": garbage_collect_conversation(store, inactivity_days=args.inactivity_days)}, default=str))
+        elif args.command == "organization" and args.organization_command == "service-fixture":
+            manager = SandboxedServiceManager(args.fixture_root, args.manager)
+            result = manager.install(args.service_command, args.state_path or str(store.path)) if args.action == "install" else manager.install_unit(args.service_command, args.state_path or str(store.path)) if args.action == "install-unit" else {"removed": manager.uninstall() if args.action == "uninstall" else manager.uninstall_unit()}
+            print(json.dumps(result, default=str))
+        elif args.command == "organization" and args.organization_command == "service":
+            manager = ProductionServiceManager(args.root, args.manager, subprocess_service_executor(args.manager))
+            result = manager.install(args.service_command or ["acp", "daemon-ipc"], args.state_path or str(store.path)) if args.action == "install" else manager.uninstall() if args.action == "uninstall" else manager.status()
+            print(json.dumps(result, default=str))
     finally:
         store.close()
     return 0

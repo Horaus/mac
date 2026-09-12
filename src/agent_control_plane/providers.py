@@ -257,6 +257,12 @@ class GeminiAdapter(CommandAdapter):
 def provider(name: str) -> ProviderAdapter:
     if name == "codex": return CodexAdapter()
     if name == "gemini": return GeminiAdapter()
+    # Explicitly offline fixtures are available through the same provider
+    # boundary, but are never aliases for live or paid credentials.
+    if name in {"google-gemini-fixture", "cloudflare-workers-ai-fixture"}:
+        from .recorded_provider import RecordedFreeAPIAdapter
+        provider_name = "google-gemini" if name.startswith("google") else "cloudflare-workers-ai"
+        return RecordedFreeAPIAdapter(provider_name)
     raise ValueError(f"unsupported provider: {name}")
 
 

@@ -11,5 +11,8 @@ if __name__ == "__main__":
     elif len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "http":
         parser = argparse.ArgumentParser(); parser.add_argument("--state", required=True); parser.add_argument("--host", default="127.0.0.1"); parser.add_argument("--port", type=int, default=8765)
         args=parser.parse_args(__import__("sys").argv[2:]); serve_http(args.state, args.host, args.port)
+    elif len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "daemon-ipc":
+        from .daemon_ipc import main as daemon_main
+        raise SystemExit(daemon_main(__import__("sys").argv[2:]))
     else:
         raise SystemExit(main())

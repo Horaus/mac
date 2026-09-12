@@ -48,8 +48,15 @@ def _context_packet(store: Store, task_id: str, policy: AuthorityPolicy, supplie
     if isinstance(supplied, ContextPacket):
         return supplied
     task = store.task(task_id)
+    goal_id = task["goal_id"] if task and task["goal_id"] else None
+    goal = store.db.execute("SELECT id,title,status,worker_pack_id,inspection_mode FROM goals WHERE id=?", (goal_id,)).fetchone() if goal_id else None
+    checkpoint = store.db.execute("SELECT id,sequence,state_json,next_action,recoverability FROM checkpoints WHERE goal_id=? ORDER BY sequence DESC LIMIT 1", (goal_id,)).fetchone() if goal_id else None
+    memories = [dict(row) for row in store.db.execute("SELECT id,digest,version,source,status FROM memory_items WHERE namespace=? AND status IN ('CANDIDATE','WORKING','PROMOTED') AND tombstoned_at IS NULL ORDER BY created_at DESC LIMIT 20", (f"goal:{goal_id}",))] if goal_id else []
+    current = {"task_id": task_id, "status": task["status"] if task else "unknown", "goal_id": goal_id,
+               "goal": dict(goal) if goal else None, "checkpoint": dict(checkpoint) if checkpoint else None,
+               "memory_refs": memories}
     return ContextPacket(1, task["title"] if task else task_id,
-                         {"task_id": task_id, "status": task["status"] if task else "unknown"},
+                         current,
                          authorizations=tuple(sorted(policy.capabilities)),
                          prohibited_actions=("accept_without_validation", "merge_worker_changes"),
                          resources=tuple(row["resource"] for row in store.db.execute("SELECT resource FROM task_resources WHERE task_id=?", (task_id,))),
@@ -256,6 +263,7 @@ def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdap
                     provider_session_id=resume_session_id, resume_session_id=resume_session_id,
                     context_checkpoint=context_checkpoint, requested_budget=budget, effective_budget=budget,
                     enforcement_source="mac-preflight", budget_mode="hard" if profile.context.hard_input_tokens is not None else "soft")
+    store.record_run_archetype(run_id)
     if restricted_manifest is not None:
         store.record_context_manifest(run_id, restricted_manifest)
     store.record_run_authority(run_id, resolved_authority, packet)
@@ -357,6 +365,7 @@ def start_managed_worker(store: Store, task_id: str, worker_id: str, adapter: Pr
                     provider_session_id=run.session_id,
                     requested_budget=budget, effective_budget=budget, enforcement_source="mac-preflight",
                     budget_mode="hard" if profile.context.hard_input_tokens is not None else "soft")
+    store.record_run_archetype(run.run_id)
     if restricted_manifest is not None:
         store.record_context_manifest(run.run_id, restricted_manifest)
     store.bind_process_identity(run.run_id, HOST_INSTANCE_ID, run.process.pid, process_start_identity(run.process.pid), time.time() + 30)
@@ -380,6 +389,18 @@ def start_managed_worker(store: Store, task_id: str, worker_id: str, adapter: Pr
 def finish_managed_worker(store: Store, task_id: str, worker_id: str, run: ManagedRun) -> WorkerResult:
     started_at = time.monotonic()
     result = run.wait()
+    durable_run = store.db.execute("SELECT status FROM runs WHERE id=?", (run.run_id,)).fetchone()
+    durable_task = store.task(task_id)
+    # A waiter can race with supervisor cancellation/terminal reconciliation.
+    # Once durable state is terminal, late provider output is never allowed to
+    # reopen the task or emit TASK_COMPLETE.
+    if durable_run and durable_run["status"] in {"CANCELLED", "FAILED", "ORPHANED"} or durable_task and durable_task["status"] in {"FAILED", "DONE", "ACCEPTED"}:
+        if durable_run and durable_run["status"] == "RUNNING":
+            store.finish_run(run.run_id, "CANCELLED", 130, result.output, result.session_id, "LATE_TERMINAL_RESULT")
+        store.release_task_leases(task_id)
+        store.add_message("LATE_RESULT_IGNORED", {"run_id": run.run_id, "exit_code": result.exit_code, "reason": "durable terminal state"}, task_id, worker_id)
+        _cleanup_restricted_workspace(getattr(run, "restricted_workspace", None))
+        return WorkerResult(130, result.output, result.session_id, result.usage or {}, "LATE_TERMINAL_RESULT")
     store.heartbeat(run.run_id, "finish")
     profile = profile_from(json.loads(store.db.execute("SELECT profile_json FROM runs WHERE id=?", (run.run_id,)).fetchone()[0]))
     result = _bounded_result(result, profile)
@@ -454,17 +475,54 @@ def resume_managed_worker(store: Store, task_id: str, worker_id: str, adapter: P
                                packet.authorizations, packet.prohibited_actions, packet.resources, packet.leases,
                                packet.relevant_files, packet.runtime, packet.acceptance_criteria, packet.stop_conditions, packet.response_schema)
     resume_snapshot = from_snapshot or profile.snapshot() == snapshot.snapshot()
+    checkpoint_fallback = False
     if adapter.__class__.resume is ProviderAdapter.resume:
-        if previous: store.set_run_phase(previous["id"], "ORPHANED")
-        if task["status"] == "READY": store.set_task_status(task_id, "WAITING_DECISION")
-        store.add_message("BLOCKER", {"reason": "provider session cannot resume", "session_id": session_id, "recovery": "start a new session with context_checkpoint"}, task_id=task_id, worker_id=worker_id)
-        raise RuntimeError("provider cannot resume session; recovery requires a new context checkpoint")
+        if context_checkpoint is None:
+            if previous: store.set_run_phase(previous["id"], "ORPHANED")
+            if task["status"] == "READY": store.set_task_status(task_id, "WAITING_DECISION")
+            store.add_message("BLOCKER", {"reason": "provider session cannot resume", "session_id": session_id, "recovery": "start a new session with context_checkpoint"}, task_id=task_id, worker_id=worker_id)
+            raise RuntimeError("provider cannot resume session; recovery requires a new context checkpoint")
+        # Native continuity is unavailable, so a supervisor-supplied,
+        # durable checkpoint permits an explicit new-session recovery.  This
+        # is deliberately not inferred from the old prompt or session id.
+        required_checkpoint = ("worker_pack", "working_memory", "goal_restatement", "prohibited_actions")
+        missing_checkpoint = [key for key in required_checkpoint if not context_checkpoint.get(key)]
+        if missing_checkpoint:
+            if previous:
+                store.set_run_phase(previous["id"], "ORPHANED")
+            if task["status"] == "READY":
+                store.set_task_status(task_id, "WAITING_DECISION")
+            store.add_message("BLOCKER", {"reason": "checkpoint reconciliation failed",
+                                           "missing": missing_checkpoint,
+                                           "recovery": "supply complete worker pack, working memory, goal restatement, and prohibited actions"},
+                              task_id=task_id, worker_id=worker_id)
+            raise RuntimeError("checkpoint fallback requires complete reconciliation fields")
+        store.add_message("SESSION_FALLBACK", {
+            "old_session_id": session_id,
+            "recovery": "new provider session",
+            "checkpoint_supplied": True,
+            "worker_pack_injected": bool(context_checkpoint.get("worker_pack") or context_checkpoint.get("worker_pack_id")),
+            "working_memory_injected": bool(context_checkpoint.get("working_memory")),
+            "goal_restatement_required": True,
+            "goal_restatement_present": True,
+            "prohibited_actions_injected": True,
+            "disclosure": "conversation memory restored from supervisor checkpoint; provider session was not resumed",
+        }, task_id=task_id, worker_id=worker_id)
+        checkpoint_fallback = True
     # Resume is still a new managed execution for the destination task. Claim
     # it and capture declared resources before invoking the provider boundary.
     store.claim_task(task_id, worker_id)
     store.capture_declared_resources(task_id)
     try:
-        run = adapter.resume(session_id, prompt, Path(cwd), profile, resume_snapshot=resume_snapshot)
+        if checkpoint_fallback:
+            try:
+                run = adapter.start(prompt, Path(cwd), profile, context_packet=packet)
+            except TypeError as error:
+                if "context_packet" not in str(error):
+                    raise
+                run = adapter.start(prompt, Path(cwd), profile)
+        else:
+            run = adapter.resume(session_id, prompt, Path(cwd), profile, resume_snapshot=resume_snapshot)
     except NotImplementedError as error:
         if previous:
             store.set_run_phase(previous["id"], "ORPHANED")
@@ -487,6 +545,7 @@ def resume_managed_worker(store: Store, task_id: str, worker_id: str, adapter: P
                     context_checkpoint=context_checkpoint,
                     requested_budget=budget, effective_budget=budget, enforcement_source="mac-preflight",
                     budget_mode="hard" if profile.context.hard_input_tokens is not None else "soft")
+    store.record_run_archetype(run.run_id)
     if profile.context.allowed_paths:
         store.record_context_manifest(run.run_id, _allowlist_manifest(Path(cwd), profile.context.allowed_paths))
     store.record_run_authority(run.run_id, resolved_authority, packet)
