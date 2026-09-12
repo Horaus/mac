@@ -317,7 +317,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
             _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.5.1"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.5.2"},
                 "instructions": f"Startup reconciliation recovered {recovered_count} run(s). You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
@@ -596,7 +596,13 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             compact = store.result_only_snapshot(a["task_id"])
             return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"], "result": compact}, ensure_ascii=False)}]}
         run = ACTIVE_RUNS.pop(key, None)
-        if run is None: raise ValueError("managed worker is not active")
+        if run is None:
+            task = store.task(a["task_id"])
+            latest = store.latest_run(a["task_id"], a["worker_id"])
+            if task is not None and latest is not None and task["status"] in {"WAITING_DECISION", "REVIEW", "FAILED", "ACCEPTED", "DONE"}:
+                compact = store.result_only_snapshot(a["task_id"])
+                return {"content": [{"type": "text", "text": json.dumps({"exit_code": latest["exit_code"], "session_id": latest["session_id"], "status": task["status"], "result": compact, "replayed": True}, ensure_ascii=False)}]}
+            raise ValueError("managed worker is not active")
         result = finish_managed_worker(store, *key, run)
         if key in ACTIVE_QUEUE_IDS: store.mark_managed_finished(ACTIVE_QUEUE_IDS.pop(key))
         config_path = store.path.parent / "config.json"
@@ -650,7 +656,17 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
     if name == "create_resource":
         store.add_resource(a["name"], a["kind"], a.get("paths", [])); return {"content": [{"type": "text", "text": f"created {a['name']}"}]}
     if name == "send_message":
-        store.add_message(a["type"], a.get("payload", {}), a.get("task_id"), a.get("worker_id")); return {"content": [{"type": "text", "text": "queued"}]}
+        message_type = a["type"]
+        task_id = a.get("task_id")
+        if message_type in {"QUESTION", "DECISION_REQUIRED"}:
+            if not task_id:
+                _invalid_field("task_id", "non-empty string required for decision messages", task_id)
+            task = store.task(task_id)
+            if task is None:
+                raise ValueError(f"unknown task: {task_id}")
+            if task["status"] == "RUNNING":
+                store.set_task_status(task_id, "WAITING_DECISION")
+        store.add_message(message_type, a.get("payload", {}), task_id, a.get("worker_id")); return {"content": [{"type": "text", "text": "queued"}]}
     if name == "accept_task": store.accept_task(a["task_id"]); return {"content": [{"type": "text", "text": f"accepted {a['task_id']}"}]}
     if name == "accept_integration":
         project = store.path.parent.parent

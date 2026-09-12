@@ -687,6 +687,24 @@ class Store:
             self.db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (status, self._now(), task_id))
             self.db.commit()
 
+    def settle_task_result(self, task_id: str, complete: bool) -> str:
+        """Atomically settle provider completion without overriding a decision checkpoint."""
+        with self._queue_lock:
+            current = self.task(task_id)
+            if current is None:
+                raise ValueError(f"unknown task: {task_id}")
+            status = current["status"]
+            if status == "WAITING_DECISION":
+                return status
+            target = "REVIEW" if complete else "FAILED"
+            if status == target:
+                return status
+            if target not in self.TASK_TRANSITIONS.get(status, set()):
+                raise ValueError(f"invalid task transition: {status} -> {target}")
+            self.db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (target, self._now(), task_id))
+            self.db.commit()
+            return target
+
     def claim_task(self, task_id: str, worker_id: str, base_commit: str | None = None) -> None:
         """Atomically claim a runnable task so duplicate dispatch cannot execute it."""
         self.db.execute("BEGIN IMMEDIATE")

@@ -287,14 +287,12 @@ def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdap
     result = _bounded_result(result, profile)
     prompt_bytes = len(prompt.encode("utf-8"))
     result.usage.update({"prompt_bytes": prompt_bytes, "prompt_context_bytes": prompt_bytes, "wall_time_ms": int((time.monotonic() - started_at) * 1000)})
-    current_status = store.task(task_id)["status"]
-    status = "WAITING_DECISION" if current_status == "WAITING_DECISION" else ("REVIEW" if result.exit_code == 0 else "FAILED")
     store.set_worker_status(worker_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.session_id)
     store.finish_run(run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id, result.failure_class, result.usage)
     if result.usage.get("soft_budget_exceeded"):
         store.add_message("BLOCKER", {"reason": "soft context budget exceeded", "input_tokens": result.usage.get("input_tokens")}, task_id=task_id, worker_id=worker_id)
     _record_run_evidence(store, run_id, result, profile, Path(cwd), adapter, prompt)
-    store.set_task_status(task_id, status)
+    status = store.settle_task_result(task_id, result.exit_code == 0)
     store.release_task_leases(task_id)
     event_type = "QUESTION" if status == "WAITING_DECISION" else ("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER")
     store.add_message(event_type,
@@ -408,14 +406,12 @@ def finish_managed_worker(store: Store, task_id: str, worker_id: str, run: Manag
     result = _bounded_result(result, profile)
     prompt_bytes = len("managed run".encode())
     result.usage.update({"prompt_bytes": prompt_bytes, "prompt_context_bytes": prompt_bytes, "wall_time_ms": int((time.monotonic() - started_at) * 1000)})
-    current_status = store.task(task_id)["status"]
-    status = "WAITING_DECISION" if current_status == "WAITING_DECISION" else ("REVIEW" if result.exit_code == 0 else "FAILED")
     store.set_worker_status(worker_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.session_id)
     store.finish_run(run.run_id, "COMPLETED" if result.exit_code == 0 else "FAILED", result.exit_code, result.output, result.session_id, result.failure_class, result.usage)
     if result.usage.get("soft_budget_exceeded"):
         store.add_message("BLOCKER", {"reason": "soft context budget exceeded", "input_tokens": result.usage.get("input_tokens")}, task_id=task_id, worker_id=worker_id)
     _record_run_evidence(store, run.run_id, result, profile, run.cwd, run.adapter, "managed run")
-    store.set_task_status(task_id, status)
+    status = store.settle_task_result(task_id, result.exit_code == 0)
     store.release_task_leases(task_id)
     event_type = "QUESTION" if status == "WAITING_DECISION" else ("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER")
     store.add_message(event_type,
