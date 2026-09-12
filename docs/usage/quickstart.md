@@ -24,3 +24,15 @@ python3 -m agent_control_plane mcp \
 ```
 
 The MCP process uses newline-delimited JSON-RPC on stdin/stdout. It is intended for a local trusted supervisor process, not an unauthenticated network service.
+
+## Execution and compact results
+
+Use `execution.mode` as the canonical authority field. Supported values are
+`read-only`, `workspace-write`, `isolated_sandbox`, and `open_operator`.
+Provider-specific `sandbox` belongs to the execution profile and must not be
+used as a replacement for authority mode.
+
+For a compact task result, call `status` with `task_id`,
+`inspection_mode: result_only`, and an optional `byte_limit` from 512 to 16384.
+The response excludes unrelated history, validation stdout, transcripts, and
+activity dumps. Follow `evidence_id` only when deeper inspection is required.

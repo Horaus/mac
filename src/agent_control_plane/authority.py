@@ -14,6 +14,8 @@ from typing import Iterable
 
 
 class ExecutionMode(str, Enum):
+    READ_ONLY = "read-only"
+    WORKSPACE_WRITE = "workspace-write"
     OPEN_OPERATOR = "open_operator"
     ISOLATED_SANDBOX = "isolated_sandbox"
 
@@ -48,6 +50,13 @@ class AuthorityPolicy:
     def __post_init__(self):
         unknown = set(self.capabilities) - CAPABILITIES
         if unknown: raise ValueError(f"unknown capabilities: {', '.join(sorted(unknown))}")
+        if self.mode == ExecutionMode.READ_ONLY and self.capabilities.intersection({
+            "filesystem.write", "shell.execute", "git.commit", "git.integrate", "git.push",
+            "app.mutate", "browser.navigate", "browser.reload_tab", "browser.reload_extension",
+            "browser.restart", "provider.free_submit", "provider.paid_submit", "destructive.delete",
+            "external.publish", "dependency.install",
+        }):
+            raise PermissionError("read-only execution mode cannot grant mutation capabilities")
 
     def snapshot(self):
         return {"mode": self.mode.value, "capabilities": sorted(self.capabilities)}

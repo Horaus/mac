@@ -31,8 +31,8 @@ from .service_fixtures import ProductionServiceManager, SandboxedServiceManager,
 
 
 TOOL_DEFS = {
-    "status": {}, "inbox": {}, "reconcile": {}, "managed_queue_status": {},
-    "control_status": {},
+    "status": {"task_id": {"type": "string"}, "inspection_mode": {"type": "string", "enum": ["result_only", "full"]}, "byte_limit": {"type": "number"}}, "inbox": {}, "reconcile": {}, "managed_queue_status": {},
+    "control_status": {"task_id": {"type": "string"}, "inspection_mode": {"type": "string", "enum": ["result_only", "full"]}, "byte_limit": {"type": "number"}},
     "control_set_policy": {"policy": {"type": "string"}},
     "control_register_master": {"master_id": {"type": "string"}, "name": {"type": "string"}, "min_workers": {"type": "number"}, "max_workers": {"type": "number"}},
     "control_request_master_workers": {"master_id": {"type": "string"}, "requested": {"type": "number"}},
@@ -60,8 +60,8 @@ TOOL_DEFS = {
     "accept_task": {"task_id": {"type": "string"}}, "pause_task": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
     "resume_task": {"task_id": {"type": "string"}}, "cancel_task": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
     "resolve_conflict": {"decision_id": {"type": "string"}, "task_id": {"type": "string"}, "decision": {"type": "string"}, "reason": {"type": "string"}},
-    "run_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "resume_from_task_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object"}, "wait": {"type": "boolean"}},
-    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object"}, "resources": {"type": "array"}},
+    "run_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "resume_from_task_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object", "properties": {"mode": {"type": "string", "enum": [mode.value for mode in ExecutionMode]}, "capabilities": {"type": "array", "items": {"type": "string"}}}}, "wait": {"type": "boolean"}},
+    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object", "properties": {"mode": {"type": "string", "enum": [mode.value for mode in ExecutionMode]}, "capabilities": {"type": "array", "items": {"type": "string"}}}}, "rules": {"type": "array", "items": {"type": "object"}}, "skills": {"type": "array", "items": {"type": "object"}}, "resources": {"type": "array", "items": {"type": "object", "required": ["resource"], "properties": {"resource": {"type": "string"}, "mode": {"type": "string", "enum": ["READ", "WRITE"]}}}}},
     "pause_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "resume_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "wait_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
@@ -196,6 +196,36 @@ def _resolved_provider(store: Store, task_id: str, worker_id: str, dispatch: dic
 def _history_limit(profile) -> int:
     return profile.context.history_limit
 
+def _invalid_field(field: str, expected_schema: str, value) -> None:
+    raise ValueError(json.dumps({"invalid_field": field, "expected_schema": expected_schema,
+                                 "received_type": type(value).__name__}, sort_keys=True))
+
+def _validate_start_worker_pack(args: dict) -> None:
+    """Validate worker-pack shaped fields before scheduler/provider side effects."""
+    for field in ("rules", "skills"):
+        value = args.get(field, [])
+        if not isinstance(value, list):
+            _invalid_field(field, "array<object>", value)
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                _invalid_field(f"{field}[{index}]", "object", item)
+    resources = args.get("resources", [])
+    if not isinstance(resources, list):
+        _invalid_field("resources", "array<{resource:string,mode:READ|WRITE}>", resources)
+    for index, item in enumerate(resources):
+        if not isinstance(item, dict):
+            _invalid_field(f"resources[{index}]", "{resource:string,mode:READ|WRITE}", item)
+        if not isinstance(item.get("resource"), str) or not item.get("resource"):
+            _invalid_field(f"resources[{index}].resource", "non-empty string", item.get("resource"))
+        if item.get("mode", "WRITE") not in {"READ", "WRITE"}:
+            _invalid_field(f"resources[{index}].mode", "READ|WRITE", item.get("mode"))
+    execution = args.get("execution", {}) or {}
+    if not isinstance(execution, dict):
+        _invalid_field("execution", "object", execution)
+    mode = execution.get("mode", ExecutionMode.ISOLATED_SANDBOX.value)
+    if mode not in {item.value for item in ExecutionMode}:
+        _invalid_field("execution.mode", "|".join(item.value for item in ExecutionMode), mode)
+
 def _authority(args: dict) -> AuthorityPolicy:
     execution = args.get("execution", {}) or {}
     mode = ExecutionMode(execution.get("mode", ExecutionMode.ISOLATED_SANDBOX.value))
@@ -287,7 +317,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
             _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.5.0"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.5.1"},
                 "instructions": f"Startup reconciliation recovered {recovered_count} run(s). You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
@@ -299,7 +329,17 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
     missing = [key for key in REQUIRED_ARGS.get(name, ()) if key not in a]
     if missing:
         raise ValueError(f"missing required MCP arguments: {','.join(missing)}")
-    if name == "status": return {"content": [{"type": "text", "text": json.dumps(store.snapshot())}]}
+    if name == "status":
+        if a.get("inspection_mode") == "result_only":
+            if not a.get("task_id"):
+                _invalid_field("task_id", "non-empty string required for result_only", a.get("task_id"))
+            payload = store.result_only_snapshot(a["task_id"], int(a.get("byte_limit", 8192)))
+        elif a.get("inspection_mode", "full") == "full":
+            payload = store.snapshot()
+        else:
+            _invalid_field("inspection_mode", "result_only|full", a.get("inspection_mode"))
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if a.get("inspection_mode") == "result_only" else json.dumps(payload, ensure_ascii=False)
+        return {"content": [{"type": "text", "text": text}]}
     if name == "org_create_goal": return {"content": [{"type": "text", "text": json.dumps(org_create_goal(store, a["goal_id"], a["title"], a["owner"], a.get("specialist_id"), a.get("acceptance_criteria"), a.get("inspection_mode", "result_only"), a.get("checkpoint_policy"), a.get("worker_profile"), a.get("worker_pack"), a.get("permissions"), a.get("worker_class", "basic")))}]}
     if name == "org_goal_summary": return {"content": [{"type": "text", "text": json.dumps(goal_summary(store, a["goal_id"], int(a.get("cursor", 0)), int(a.get("limit", 20)), a.get("fields")))}]}
     if name == "org_goal_event": return {"content": [{"type": "text", "text": json.dumps(append_goal_event(store, a["goal_id"], a["kind"], a.get("payload", {}), a["actor"]))}]}
@@ -406,7 +446,17 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
         return {"content": [{"type": "text", "text": json.dumps({"stopped": stopped})}]}
     if name == "review_evidence":
         return {"content": [{"type": "text", "text": json.dumps(store.review_evidence(a["task_id"]))}]}
-    if name == "control_status": return {"content": [{"type": "text", "text": json.dumps(store.control_snapshot(), ensure_ascii=False)}]}
+    if name == "control_status":
+        mode = a.get("inspection_mode", "full")
+        if mode == "result_only":
+            if not a.get("task_id"):
+                _invalid_field("task_id", "non-empty string required for result_only", a.get("task_id"))
+            payload = store.result_only_snapshot(a["task_id"], int(a.get("byte_limit", 8192)))
+        elif mode == "full":
+            payload = store.control_snapshot()
+        else:
+            _invalid_field("inspection_mode", "result_only|full", mode)
+        return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]}
     if name == "control_set_policy":
         store.control_set_policy(a["policy"]); return {"content": [{"type": "text", "text": "control policy updated"}]}
     if name == "control_register_master":
@@ -457,6 +507,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
         return {"content": [{"type": "text", "text": json.dumps({"status": "RUNNING", "queue_id": submitted["queue_id"]})}]}
     if name == "start_worker":
+        _validate_start_worker_pack(a)
         key = (a["task_id"], a["worker_id"])
         # ACTIVE_RUNS is process-local; temporary/test state databases may
         # reuse task IDs, so discard a handle that is not present in this DB.
@@ -542,7 +593,8 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
         if key in MANAGED_FUTURES:
             scheduler, future, queue_id = MANAGED_FUTURES.pop(key)
             result = future.result()
-            return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
+            compact = store.result_only_snapshot(a["task_id"])
+            return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"], "result": compact}, ensure_ascii=False)}]}
         run = ACTIVE_RUNS.pop(key, None)
         if run is None: raise ValueError("managed worker is not active")
         result = finish_managed_worker(store, *key, run)
@@ -554,7 +606,8 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
                 provider, profile_from,
                 lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
                 _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
-        return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
+        compact = store.result_only_snapshot(a["task_id"])
+        return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"], "result": compact}, ensure_ascii=False)}]}
     if name == "cancel_worker":
         key = (a["task_id"], a["worker_id"])
         run = ACTIVE_RUNS.pop(key, None)

@@ -8,6 +8,8 @@ import os
 import io
 import contextlib
 import textwrap
+import getpass
+import hashlib
 from pathlib import Path
 
 from .providers import provider
@@ -104,7 +106,8 @@ def _menu(project="."):
     guide_label = guide_names.get(profile.get("language", "en"), guide_names["en"])
     uninstall_names = {"en": "Uninstall MAC", "vi": "Gỡ cài đặt MAC", "zh": "卸载 MAC", "ja": "MAC をアンインストール", "ko": "MAC 제거", "fr": "Désinstaller MAC", "es": "Desinstalar MAC", "de": "MAC deinstallieren"}
     uninstall_label = uninstall_names.get(profile.get("language", "en"), uninstall_names["en"])
-    items = [(labels[0], "setup"), (labels[1], "status"), (guide_label, "guide"), (labels[2], "update"), (labels[3], "doctor"), (uninstall_label, "uninstall"), (labels[4], "quit")]
+    api_label = "Thêm API Google / Cloudflare" if profile.get("language", "en") == "vi" else "Add Google / Cloudflare API"
+    items = [(labels[0], "setup"), (api_label, "api"), (labels[1], "status"), (guide_label, "guide"), (labels[2], "update"), (labels[3], "doctor"), (uninstall_label, "uninstall"), (labels[4], "quit")]
     def apply_theme(win):
         if curses.has_colors():
             curses.start_color(); curses.use_default_colors()
@@ -191,8 +194,26 @@ def _menu(project="."):
     except (curses.error, OSError): print("MAC cần một Terminal tương tác."); return 1
     if choice == "quit": return 0
     if choice == "setup": run_setup(project)
+    elif choice == "api":
+        lang = profile.get("language", "en")
+        print("\nAPI miễn phí: 1) Google Gemini  2) Cloudflare Workers AI" if lang == "vi" else "\nFree API: 1) Google Gemini  2) Cloudflare Workers AI")
+        selected = input("Chọn provider [1]: " if lang == "vi" else "Choose provider [1]: ").strip() or "1"
+        provider_name = "cloudflare-workers-ai" if selected == "2" else "google-gemini"
+        default_account = "default" if provider_name == "google-gemini" else ""
+        account = input(("Cloudflare account ID" if provider_name.startswith("cloudflare") else "Tên cấu hình") + (f" [{default_account}]" if default_account else "") + ": ").strip() or default_account
+        secret = getpass.getpass("API key/token (được lưu trong OS credential store): " if lang == "vi" else "API key/token (stored in the OS credential store): ")
+        try:
+            from .secret_store import store_secret
+            reference = store_secret(provider_name, account, secret)
+            api_store = Store(state_path(project))
+            register_credential_ref(api_store, provider_name, account, reference,
+                                    "sha256:" + hashlib.sha256(secret.encode()).hexdigest())
+            api_store.close()
+            print("✓ Đã thêm API. MAC chỉ lưu tham chiếu, không lưu secret." if lang == "vi" else "✓ API added. MAC stores only the reference, not the secret.")
+        except Exception as error:
+            print(f"! Không thể thêm API: {error}" if lang == "vi" else f"! Could not add API: {error}")
     elif choice == "status":
-        store = Store(state_path(project)); snapshot = store.snapshot(); store.close()
+        store = Store(state_path(project)); snapshot = store.dashboard_snapshot(); store.close()
         lines = ["Chưa có hoạt động nào. MAC đã sẵn sàng nhận task." if not snapshot else f"{key}: {value}" for key, value in snapshot.items()]
         if not lines: lines = ["Chưa có hoạt động nào. MAC đã sẵn sàng nhận task."]
         panel("TRẠNG THÁI", lines or ["Chưa có dữ liệu task."])

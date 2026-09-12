@@ -360,11 +360,11 @@ class Store:
     LEASE_MODES = {"READ", "WRITE"}
     TASK_TRANSITIONS = {
         "READY": {"RUNNING", "WAITING_RESOURCE", "WAITING_DEPENDENCY", "WAITING_DECISION", "PAUSED", "FAILED", "DISPUTED", "STALE"},
-        "RUNNING": {"REVIEW", "FAILED", "PAUSED", "DISPUTED", "STALE"},
+        "RUNNING": {"REVIEW", "WAITING_DECISION", "FAILED", "PAUSED", "DISPUTED", "STALE"},
         "REVIEW": {"ACCEPTED", "REPAIR", "DISPUTED", "STALE", "FAILED"},
         "ACCEPTED": {"DONE"}, "DONE": set(), "FAILED": {"READY", "REPAIR", "STALE"},
         "PAUSED": {"READY", "RUNNING", "FAILED", "STALE"}, "WAITING_RESOURCE": {"READY", "RUNNING", "PAUSED", "STALE", "FAILED"},
-        "WAITING_DEPENDENCY": {"READY", "RUNNING", "PAUSED", "STALE", "FAILED"}, "WAITING_DECISION": {"READY", "REPAIR", "PAUSED", "STALE", "FAILED"},
+        "WAITING_DEPENDENCY": {"READY", "RUNNING", "PAUSED", "STALE", "FAILED"}, "WAITING_DECISION": {"READY", "RUNNING", "REVIEW", "REPAIR", "PAUSED", "STALE", "FAILED"},
         "STALE": {"READY", "REPAIR", "DISPUTED", "PAUSED", "FAILED"}, "DISPUTED": {"REPAIR", "WAITING_DECISION", "PAUSED", "STALE", "FAILED"},
         "REPAIR": {"READY", "RUNNING", "PAUSED", "FAILED", "STALE"},
     }
@@ -1210,6 +1210,41 @@ class Store:
                 "leases": [dict(row) for row in self.db.execute("SELECT * FROM leases WHERE task_id=?", (run["task_id"],))],
                 "messages": [dict(row) for row in self.db.execute("SELECT * FROM messages WHERE task_id=? ORDER BY id", (run["task_id"],))]}
 
+    def result_only_snapshot(self, task_id: str, byte_limit: int = 8192) -> dict[str, Any]:
+        """Return one compact task outcome without historical or transcript data."""
+        if byte_limit < 512 or byte_limit > 16384:
+            raise ValueError("result_only byte_limit must be 512..16384")
+        task = self.task(task_id)
+        if task is None:
+            raise ValueError(f"unknown task: {task_id}")
+        run = self.latest_run(task_id)
+        message = self.db.execute(
+            "SELECT id,type,payload,created_at FROM messages WHERE task_id=? AND type IN ('QUESTION','TASK_COMPLETE','BLOCKER') ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        payload = {}
+        if message:
+            try: payload = json.loads(message["payload"])
+            except json.JSONDecodeError: payload = {"summary": "invalid stored message payload"}
+        # Large provider output belongs in durable evidence, never status.
+        for key in ("output", "stdout", "activity", "transcript", "state"):
+            payload.pop(key, None)
+        result = {
+            "task": {"id": task["id"], "title": task["title"], "status": task["status"], "worker_id": task["worker_id"]},
+            "latest": ({"event_id": message["id"], "type": message["type"], "payload": payload} if message else None),
+            "run": ({"id": run["id"], "status": run["status"], "exit_code": run["exit_code"], "failure_class": run["failure_class"]} if run else None),
+            "inspection_mode": "result_only",
+        }
+        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > byte_limit:
+            result["latest"] = {"event_id": message["id"], "type": message["type"], "payload": {"summary": "result omitted; inspect evidence by id"}} if message else None
+            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > byte_limit:
+            raise ValueError("result_only metadata exceeds configured byte limit")
+        result["payload_bytes"] = len(encoded)
+        result["payload_limit"] = byte_limit
+        return result
+
     def queue_steering(self, run_id: str, instruction: str, scope: str) -> None:
         if not instruction or not scope: raise ValueError("scoped queued steering requires instruction and scope")
         row = self.db.execute("SELECT steering_json FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -1373,3 +1408,15 @@ class Store:
                 "leases": [dict(x) for x in self.db.execute("SELECT * FROM leases WHERE expires_at>?", (self._now(),))],
                 "unread_messages": len(self.inbox()), "decisions": [dict(x) for x in self.db.execute("SELECT * FROM decisions ORDER BY created_at")],
                 "validations": [dict(x) for x in self.db.execute("SELECT * FROM validations ORDER BY created_at")]} 
+
+    def dashboard_snapshot(self, recent_limit: int = 12) -> dict[str, Any]:
+        """Fast UI summary that never loads run output or validation stdout."""
+        recent_limit = max(1, min(50, int(recent_limit)))
+        task_counts = {row["status"]: row["count"] for row in self.db.execute(
+            "SELECT status,COUNT(*) AS count FROM tasks GROUP BY status")}
+        worker_counts = {row["status"]: row["count"] for row in self.db.execute(
+            "SELECT status,COUNT(*) AS count FROM workers GROUP BY status")}
+        recent = [dict(row) for row in self.db.execute(
+            "SELECT id,title,status,worker_id,updated_at FROM tasks ORDER BY updated_at DESC LIMIT ?", (recent_limit,))]
+        return {"task_counts": task_counts, "worker_counts": worker_counts,
+                "recent_tasks": recent, "unread_messages": len(self.inbox())}

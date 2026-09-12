@@ -92,6 +92,9 @@ def resolve_secret_ref(secret_ref: str, resolver=None) -> str:
         raise ValueError("secret reference is required")
     if "://" in secret_ref:
         scheme, name = secret_ref.split("://", 1)
+        if scheme == "keychain":
+            from .secret_store import load_secret
+            return load_secret(secret_ref)
         if scheme != "env" or not name or "://" in name:
             raise ValueError("unsupported secret reference scheme")
         lookup = name
