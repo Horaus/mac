@@ -18,6 +18,7 @@ from .profiles import resolve_profile, profile_from
 from .authority import ApprovalToken, AuthorityPolicy, ContextPacket, ExecutionMode, digest
 from .provisioning import DependencyContract, verify_offline
 from .managed_scheduler import ManagedJob, ManagedScheduler
+from .isolation import ISOLATION_MODES, prepare_worker_workspace
 from .organization import (append_goal_event, assign_archetype, checkpoint as goal_checkpoint,
                             create_archetype, create_goal as org_create_goal, promote_memory,
                             propose_memory, recommend_model, recommend_worker, record_observation, set_inspection_mode,
@@ -61,7 +62,7 @@ TOOL_DEFS = {
     "resume_task": {"task_id": {"type": "string"}}, "cancel_task": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
     "resolve_conflict": {"decision_id": {"type": "string"}, "task_id": {"type": "string"}, "decision": {"type": "string"}, "reason": {"type": "string"}},
     "run_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "resume_from_task_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object", "properties": {"mode": {"type": "string", "enum": [mode.value for mode in ExecutionMode]}, "capabilities": {"type": "array", "items": {"type": "string"}}}}, "wait": {"type": "boolean"}},
-    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object", "properties": {"mode": {"type": "string", "enum": [mode.value for mode in ExecutionMode]}, "capabilities": {"type": "array", "items": {"type": "string"}}}}, "rules": {"type": "array", "items": {"type": "object"}}, "skills": {"type": "array", "items": {"type": "object"}}, "resources": {"type": "array", "items": {"type": "object", "required": ["resource"], "properties": {"resource": {"type": "string"}, "mode": {"type": "string", "enum": ["READ", "WRITE"]}}}}},
+    "start_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}, "provider": {"type": "string"}, "prompt": {"type": "string"}, "cwd": {"type": "string"}, "isolation": {"type": "string", "enum": sorted(ISOLATION_MODES)}, "conversation_id": {"type": "string"}, "resume_session_id": {"type": "string"}, "context_checkpoint": {"type": "object"}, "execution": {"type": "object", "properties": {"mode": {"type": "string", "enum": [mode.value for mode in ExecutionMode]}, "capabilities": {"type": "array", "items": {"type": "string"}}}}, "rules": {"type": "array", "items": {"type": "object"}}, "skills": {"type": "array", "items": {"type": "object"}}, "resources": {"type": "array", "items": {"type": "object", "required": ["resource"], "properties": {"resource": {"type": "string"}, "mode": {"type": "string", "enum": ["READ", "WRITE"]}}}}},
     "pause_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "resume_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
     "wait_worker": {"task_id": {"type": "string"}, "worker_id": {"type": "string"}},
@@ -232,6 +233,18 @@ def _authority(args: dict) -> AuthorityPolicy:
     capabilities = frozenset(execution.get("capabilities", ())).union({"filesystem.read", "provider.preflight"})
     return AuthorityPolicy(mode, capabilities)
 
+def _worker_authority(store: Store, task, args: dict) -> AuthorityPolicy:
+    persisted = json.loads(task["execution_json"] or "{}")
+    requested = args.get("execution", {}) or {}
+    if "mode" in requested and "mode" in persisted and requested["mode"] != persisted["mode"]:
+        raise PermissionError("dispatch execution mode cannot override persisted task mode")
+    mode = ExecutionMode(requested.get("mode", persisted.get("mode", ExecutionMode.ISOLATED_SANDBOX.value)))
+    persisted_caps = set(persisted.get("capabilities", ()))
+    requested_caps = set(requested.get("capabilities", persisted_caps))
+    if requested_caps - persisted_caps - {"filesystem.read", "provider.preflight"}:
+        raise PermissionError("dispatch capabilities cannot expand persisted task authority")
+    return AuthorityPolicy(mode, frozenset(requested_caps | {"filesystem.read", "provider.preflight"}))
+
 def _persisted_mutation_authority(store: Store, args: dict) -> AuthorityPolicy:
     """Resolve mutation authority from the exact durable run/task scope.
 
@@ -317,7 +330,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
             _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.5.6"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.6.0"},
                 "instructions": f"Startup reconciliation recovered {recovered_count} run(s). You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
@@ -483,16 +496,31 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
     if name == "knowledge_ack":
         store.acknowledge_knowledge(a["actor"], a.get("worker_id")); return {"content": [{"type": "text", "text": "acknowledged"}]}
     if name == "run_worker":
+        task = store.task(a["task_id"])
+        if task is None: raise ValueError(f"unknown task: {a['task_id']}")
         prompt = a["prompt"]
         profile = _resolved_profile(store, a["task_id"], a["worker_id"], a)
+        authority = _worker_authority(store, task, a)
+        workspace = prepare_worker_workspace(store, task, a["worker_id"], a["cwd"], a.get("isolation"), authority.mode == ExecutionMode.WORKSPACE_WRITE)
+        if authority.mode == ExecutionMode.WORKSPACE_WRITE and profile.sandbox == "danger-full-access":
+            raise PermissionError("workspace-write isolation cannot use danger-full-access sandbox")
+        if authority.mode == ExecutionMode.WORKSPACE_WRITE and profile.sandbox is None:
+            snapshot = profile.snapshot(); snapshot["sandbox"] = "workspace-write"; profile = profile_from(snapshot)
+        if authority.mode == ExecutionMode.WORKSPACE_WRITE or workspace["requested_isolation"] == "persistent-worktree":
+            prompt += ("\n\nMAC WORKSPACE PREFLIGHT (authoritative):\n"
+                       f"requested_isolation={workspace['requested_isolation']}\n"
+                       f"effective_worktree={workspace['effective_worktree']}\n"
+                       f"effective_branch={workspace['effective_branch']}\n"
+                       "Verify these values before edits. If they differ, return DECISION_REQUIRED without mutation. "
+                       "Do not push; only the Master may integrate or push.")
         if a.get("conversation_id") and _history_enabled(store):
             context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
         config_path = store.path.parent / "config.json"
         config = json.loads(config_path.read_text()) if config_path.exists() else {}
         scheduler = _managed_scheduler(store, int(config.get("execution", {}).get("max_concurrent_workers", 2)))
-        job = ManagedJob(a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, a["cwd"],
-                                                   profile=profile, authority=_authority(a), context=_context(a),
+        job = ManagedJob(a["task_id"], a["worker_id"], provider(_resolved_provider(store, a["task_id"], a["worker_id"], a)), prompt, workspace["effective_worktree"],
+                                                   profile=profile, authority=authority, context=_context(a),
                                                    conversation_id=a.get("conversation_id"), resume_session_id=a.get("resume_session_id"),
                                                    resume_from_task_id=a.get("resume_from_task_id"), context_checkpoint=a.get("context_checkpoint"),
                                                    preserve_resume_snapshot=bool(a.get("resume_session_id") and not a.get("execution")))
@@ -505,7 +533,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             result = submitted["future"].result()
             MANAGED_FUTURES.pop(key, None)
             return {"content": [{"type": "text", "text": json.dumps({"exit_code": result.exit_code, "session_id": result.session_id, "status": store.task(a["task_id"])["status"]})}]}
-        return {"content": [{"type": "text", "text": json.dumps({"status": "RUNNING", "queue_id": submitted["queue_id"]})}]}
+        return {"content": [{"type": "text", "text": json.dumps({"status": "RUNNING", "queue_id": submitted["queue_id"], **workspace})}]}
     if name == "start_worker":
         _validate_start_worker_pack(a)
         for index, item in enumerate(a.get("resources", [])):
@@ -536,13 +564,26 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
         _dependency_preflight(store, task, a["task_id"], a["worker_id"])
         prompt = a["prompt"]
         profile = _resolved_profile(store, a["task_id"], a["worker_id"], a)
+        authority = _worker_authority(store, task, a)
+        workspace = prepare_worker_workspace(store, task, a["worker_id"], a["cwd"], a.get("isolation"), authority.mode == ExecutionMode.WORKSPACE_WRITE)
+        if authority.mode == ExecutionMode.WORKSPACE_WRITE and profile.sandbox == "danger-full-access":
+            raise PermissionError("workspace-write isolation cannot use danger-full-access sandbox")
+        if authority.mode == ExecutionMode.WORKSPACE_WRITE and profile.sandbox is None:
+            snapshot = profile.snapshot(); snapshot["sandbox"] = "workspace-write"; profile = profile_from(snapshot)
+        if authority.mode == ExecutionMode.WORKSPACE_WRITE or workspace["requested_isolation"] == "persistent-worktree":
+            prompt += ("\n\nMAC WORKSPACE PREFLIGHT (authoritative):\n"
+                       f"requested_isolation={workspace['requested_isolation']}\n"
+                       f"effective_worktree={workspace['effective_worktree']}\n"
+                       f"effective_branch={workspace['effective_branch']}\n"
+                       "Verify these values before edits. If they differ, return DECISION_REQUIRED without mutation. "
+                       "Do not push; only the Master may integrate or push.")
         if a.get("conversation_id") and _history_enabled(store):
             context = list(reversed(store.history(a["conversation_id"], _history_limit(profile))))
             prompt += "\n\nSHARED BOSS/WORKER HISTORY:\n" + "\n".join(f"[{row['role']}/{row['actor']}] {row['content']}" for row in context)
         adapter = provider(provider_name)
-        queued_job = ManagedJob(a["task_id"], a["worker_id"], adapter, prompt, a["cwd"],
+        queued_job = ManagedJob(a["task_id"], a["worker_id"], adapter, prompt, workspace["effective_worktree"],
                                  tuple((item["resource"], item.get("mode", "WRITE")) for item in a.get("resources", [])),
-                                 profile=profile, authority=_authority(a), context=_context(a),
+                                 profile=profile, authority=authority, context=_context(a),
                                  conversation_id=a.get("conversation_id"), resume_session_id=a.get("resume_session_id"),
                                  resume_from_task_id=a.get("resume_from_task_id"), context_checkpoint=a.get("context_checkpoint"),
                                  lifecycle="live")
@@ -566,19 +607,19 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
         try:
             if a.get("resume_session_id"):
                 if profile.context.allowed_paths:
-                    raw_context, _ = _restricted_context(Path(a["cwd"]), profile.context.allowed_paths)
+                    raw_context, _ = _restricted_context(Path(workspace["effective_worktree"]), profile.context.allowed_paths)
                 else:
                     raw_context = store.knowledge_context(profile.context.knowledge_mode)
                 prompt = _inject_context(prompt, raw_context, profile)
-                run = resume_managed_worker(store, a["task_id"], a["worker_id"], adapter, a["resume_session_id"], prompt, a["cwd"], profile=profile, resume_from_task_id=a.get("resume_from_task_id"), authority=_authority(a), context=_context(a), context_checkpoint=a.get("context_checkpoint"))
+                run = resume_managed_worker(store, a["task_id"], a["worker_id"], adapter, a["resume_session_id"], prompt, workspace["effective_worktree"], profile=profile, resume_from_task_id=a.get("resume_from_task_id"), authority=authority, context=_context(a), context_checkpoint=a.get("context_checkpoint"))
             else:
-                run = start_managed_worker(store, a["task_id"], a["worker_id"], adapter, prompt, a["cwd"], profile=profile, authority=_authority(a), context=_context(a))
+                run = start_managed_worker(store, a["task_id"], a["worker_id"], adapter, prompt, workspace["effective_worktree"], profile=profile, authority=authority, context=_context(a))
         except Exception:
             store.mark_managed_finished(queue_id, "FAILED")
             raise
         ACTIVE_RUNS[key] = run
         ACTIVE_QUEUE_IDS[key] = queue_id
-        return {"content": [{"type": "text", "text": json.dumps({"session_id": run.session_id, "queue_id": queue_id, "status": "RUNNING"})}]}
+        return {"content": [{"type": "text", "text": json.dumps({"session_id": run.session_id, "queue_id": queue_id, "status": "RUNNING", **workspace})}]}
     if name == "pause_worker":
         key = (a["task_id"], a["worker_id"])
         run = ACTIVE_RUNS.get(key)

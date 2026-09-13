@@ -64,6 +64,10 @@ class GitIntegration:
         args.append(str(worktree))
         self._run(*args)
 
-    def push(self, remote: str = "origin", branch: str = "HEAD", authorizer=None) -> str:
+    def push(self, remote: str = "origin", branch: str = "HEAD", authorizer=None, *, protected_branch_authorized: bool = False) -> str:
+        destination = branch.rsplit(":", 1)[-1]
+        resolved = self._run("branch", "--show-current") if destination == "HEAD" else destination.removeprefix("refs/heads/")
+        if resolved in {"main", "master"} and not protected_branch_authorized:
+            raise PermissionError(f"push to protected branch requires explicit Master authorization: {resolved}")
         self._require("git.push", {"remote": remote, "branch": branch}, authorizer)
         return self._run("push", remote, branch)
