@@ -229,7 +229,7 @@ def _validate_start_worker_pack(args: dict) -> None:
 def _authority(args: dict) -> AuthorityPolicy:
     execution = args.get("execution", {}) or {}
     mode = ExecutionMode(execution.get("mode", ExecutionMode.ISOLATED_SANDBOX.value))
-    capabilities = frozenset(execution.get("capabilities", ["filesystem.read", "provider.preflight"]))
+    capabilities = frozenset(execution.get("capabilities", ())).union({"filesystem.read", "provider.preflight"})
     return AuthorityPolicy(mode, capabilities)
 
 def _persisted_mutation_authority(store: Store, args: dict) -> AuthorityPolicy:
@@ -317,7 +317,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
             _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.5.2"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.5.3"},
                 "instructions": f"Startup reconciliation recovered {recovered_count} run(s). You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
@@ -508,6 +508,9 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
         return {"content": [{"type": "text", "text": json.dumps({"status": "RUNNING", "queue_id": submitted["queue_id"]})}]}
     if name == "start_worker":
         _validate_start_worker_pack(a)
+        for index, item in enumerate(a.get("resources", [])):
+            if store.db.execute("SELECT 1 FROM resources WHERE name=?", (item["resource"],)).fetchone() is None:
+                _invalid_field(f"resources[{index}].resource", "declared resource name; call declare_resource first", item["resource"])
         key = (a["task_id"], a["worker_id"])
         # ACTIVE_RUNS is process-local; temporary/test state databases may
         # reuse task IDs, so discard a handle that is not present in this DB.

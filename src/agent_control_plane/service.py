@@ -413,9 +413,20 @@ def finish_managed_worker(store: Store, task_id: str, worker_id: str, run: Manag
     _record_run_evidence(store, run.run_id, result, profile, run.cwd, run.adapter, "managed run")
     status = store.settle_task_result(task_id, result.exit_code == 0)
     store.release_task_leases(task_id)
-    event_type = "QUESTION" if status == "WAITING_DECISION" else ("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER")
-    store.add_message(event_type,
-                      {"exit_code": result.exit_code, "summary": result.output[:2000], "evidence_id": f"run:{run.run_id}"}, task_id, worker_id)
+    # A worker-authored decision request is already the authoritative outcome.
+    # Do not overwrite its exact type with a synthetic QUESTION when the
+    # provider process subsequently exits.
+    pending_decision = store.db.execute(
+        "SELECT type FROM messages WHERE task_id=? AND type IN ('QUESTION','DECISION_REQUIRED') ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if status == "WAITING_DECISION" and pending_decision is None:
+        store.add_message("QUESTION",
+                          {"exit_code": result.exit_code, "summary": result.output[:2000], "evidence_id": f"run:{run.run_id}"}, task_id, worker_id)
+    elif status != "WAITING_DECISION":
+        event_type = "TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER"
+        store.add_message(event_type,
+                          {"exit_code": result.exit_code, "summary": result.output[:2000], "evidence_id": f"run:{run.run_id}"}, task_id, worker_id)
     _cleanup_restricted_workspace(getattr(run, "restricted_workspace", None))
     return result
 

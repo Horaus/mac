@@ -354,6 +354,20 @@ def process_start_identity(pid: int) -> str:
         return f"pid:{pid}"
 
 
+def process_identity_alive(pid: int | None, expected: str | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        # EPERM still proves that the process exists.  The start identity,
+        # when available, remains the PID-reuse guard.
+        pass
+    return not expected or process_start_identity(int(pid)) == expected
+
+
 class Store:
     TASK_STATUSES = {"READY", "RUNNING", "REVIEW", "ACCEPTED", "DONE", "FAILED", "PAUSED",
                      "WAITING_RESOURCE", "WAITING_DEPENDENCY", "WAITING_DECISION", "STALE", "DISPUTED", "REPAIR"}
@@ -1237,7 +1251,7 @@ class Store:
             raise ValueError(f"unknown task: {task_id}")
         run = self.latest_run(task_id)
         message = self.db.execute(
-            "SELECT id,type,payload,created_at FROM messages WHERE task_id=? AND type IN ('QUESTION','TASK_COMPLETE','BLOCKER') ORDER BY id DESC LIMIT 1",
+            "SELECT id,type,payload,created_at FROM messages WHERE task_id=? AND type IN ('QUESTION','DECISION_REQUIRED','TASK_COMPLETE','BLOCKER') ORDER BY id DESC LIMIT 1",
             (task_id,),
         ).fetchone()
         payload = {}
@@ -1247,15 +1261,16 @@ class Store:
         # Large provider output belongs in durable evidence, never status.
         for key in ("output", "stdout", "activity", "transcript", "state"):
             payload.pop(key, None)
+        event_type = "COMPLETE" if message and message["type"] == "TASK_COMPLETE" else (message["type"] if message else None)
         result = {
             "task": {"id": task["id"], "title": task["title"], "status": task["status"], "worker_id": task["worker_id"]},
-            "latest": ({"event_id": message["id"], "type": message["type"], "payload": payload} if message else None),
+            "latest": ({"event_id": message["id"], "type": event_type, "payload": payload} if message else None),
             "run": ({"id": run["id"], "status": run["status"], "exit_code": run["exit_code"], "failure_class": run["failure_class"]} if run else None),
             "inspection_mode": "result_only",
         }
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) > byte_limit:
-            result["latest"] = {"event_id": message["id"], "type": message["type"], "payload": {"summary": "result omitted; inspect evidence by id"}} if message else None
+            result["latest"] = {"event_id": message["id"], "type": event_type, "payload": {"summary": "result omitted; inspect evidence by id"}} if message else None
             encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) > byte_limit:
             raise ValueError("result_only metadata exceeds configured byte limit")
@@ -1317,7 +1332,9 @@ class Store:
                 active_run = self.db.execute("SELECT * FROM runs WHERE worker_id=? AND status IN ('RUNNING','STARTING','PROVIDER_RUNNING','DISCONNECTED') ORDER BY started_at DESC LIMIT 1", (worker["id"],)).fetchone()
                 # Provider-native thread IDs do not expose a local PID. They
                 # still must fail closed on host loss or heartbeat expiry.
-                if active_run and host_instance_id and active_run["host_instance_id"] and active_run["host_instance_id"] != host_instance_id:
+                if (active_run and host_instance_id and active_run["host_instance_id"] and
+                        active_run["host_instance_id"] != host_instance_id and
+                        not process_identity_alive(active_run["owner_pid"], active_run["process_start_identity"])):
                     self.db.execute("UPDATE runs SET status='ORPHANED' WHERE id=?", (active_run["id"],))
                     self.db.execute("UPDATE workers SET status='ORPHANED',updated_at=? WHERE id=?", (self._now(), worker["id"]))
                     task_row = self.db.execute("SELECT id FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker["id"],)).fetchone()
@@ -1343,15 +1360,6 @@ class Store:
                     alive = False
                 if alive:
                     run = self.db.execute("SELECT * FROM runs WHERE worker_id=? AND status IN ('RUNNING','STARTING','PROVIDER_RUNNING','DISCONNECTED') ORDER BY started_at DESC LIMIT 1", (worker["id"],)).fetchone()
-                    if run and host_instance_id and run["host_instance_id"] and run["host_instance_id"] != host_instance_id:
-                        self.db.execute("UPDATE runs SET status='ORPHANED' WHERE id=?", (run["id"],))
-                        self.db.execute("UPDATE workers SET status='ORPHANED',updated_at=? WHERE id=?", (self._now(), worker["id"]))
-                        task_row = self.db.execute("SELECT id,status FROM tasks WHERE worker_id=? AND status='RUNNING'", (worker["id"],)).fetchone()
-                        if task_row:
-                            self.db.execute("UPDATE tasks SET status='WAITING_DECISION',updated_at=? WHERE id=?", (self._now(), task_row["id"]))
-                            self.db.execute("DELETE FROM leases WHERE task_id=?", (task_row["id"],))
-                            self.db.execute("INSERT INTO messages(type,task_id,worker_id,payload,created_at) VALUES(?,?,?,?,?)", ("BLOCKER", task_row["id"], worker["id"], json.dumps({"reason": "previous MCP host no longer owns run", "recovery": "resume provider session or restart task"}), self._now()))
-                        continue
                     if run and run["process_start_identity"] and process_start_identity(int(session[4:])) != run["process_start_identity"]:
                         alive = False
                     else:
