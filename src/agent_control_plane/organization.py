@@ -41,7 +41,7 @@ def create_goal(store: Store, goal_id: str, title: str, owner: str, specialist_i
                 acceptance_criteria: list[str] | None = None, inspection_mode: str = "result_only",
                 checkpoint_policy: dict | None = None, worker_profile: dict | None = None,
                 worker_pack: str | None = None, permissions: list[str] | None = None,
-                worker_class: str = "basic") -> dict:
+                worker_class: str = "basic", *, provided_fields: set[str] | None = None) -> dict:
     if not goal_id or not title or not owner:
         raise ValueError("goal_id, title and owner are required")
     if inspection_mode not in INSPECTION_MODES:
@@ -60,12 +60,33 @@ def create_goal(store: Store, goal_id: str, title: str, owner: str, specialist_i
     existing = store.db.execute("SELECT * FROM goals WHERE id=?", (goal_id,)).fetchone()
     if existing:
         metadata = dict(existing)
-        if existing["digest"] != expected_digest:
+        supplied = provided_fields or {"goal_id", "title", "owner", "specialist_id", "acceptance_criteria",
+                                       "inspection_mode", "checkpoint_policy", "worker_profile", "worker_pack",
+                                       "permissions", "worker_class"}
+        comparisons = {
+            "title": (existing["title"], title),
+            "owner": (existing["owner"], owner),
+            "specialist_id": (existing["specialist_id"], specialist_id),
+            "acceptance_criteria": (json.loads(existing["acceptance_json"]), criteria),
+            "inspection_mode": (existing["inspection_mode"], inspection_mode),
+            "checkpoint_policy": (json.loads(existing["checkpoint_policy_json"]), policy),
+            "worker_profile": (json.loads(existing["worker_profile_json"]), profile),
+            "worker_pack": (existing["worker_pack_id"], worker_pack),
+            "permissions": (json.loads(existing["permissions_json"]), permissions),
+            "worker_class": (existing["worker_class"], worker_class),
+        }
+        conflicts = {field: {"existing": old, "requested": new}
+                     for field, (old, new) in comparisons.items()
+                     if field in supplied and old != new}
+        if conflicts:
             raise ValueError(json.dumps({"error": "goal_id_conflict", "goal_id": goal_id,
                                          "existing": {"title": existing["title"], "owner": existing["owner"],
                                                       "status": existing["status"], "digest": existing["digest"]},
+                                         "conflicts": conflicts,
                                          "requested_digest": expected_digest}, sort_keys=True))
-        metadata.update({"created": False, "already_exists": True})
+        metadata.update({"created": False, "already_exists": True,
+                         "configuration_preserved": True,
+                         "request_digest_matches": existing["digest"] == expected_digest})
         return metadata
     store.db.execute("INSERT INTO goals(id,title,status,specialist_id,inspection_mode,acceptance_json,checkpoint_policy_json,worker_profile_json,worker_pack_id,permissions_json,worker_class,digest,source,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (goal_id, title, "READY", specialist_id, inspection_mode, json.dumps(criteria), json.dumps(policy, sort_keys=True), json.dumps(profile, sort_keys=True), worker_pack, json.dumps(permissions, sort_keys=True), worker_class, expected_digest, "master", owner, stamp, stamp))

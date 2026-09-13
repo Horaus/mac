@@ -317,7 +317,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
             _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.5.4"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.5.5"},
                 "instructions": f"Startup reconciliation recovered {recovered_count} run(s). You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",
@@ -340,7 +340,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             _invalid_field("inspection_mode", "result_only|full", a.get("inspection_mode"))
         text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if a.get("inspection_mode") == "result_only" else json.dumps(payload, ensure_ascii=False)
         return {"content": [{"type": "text", "text": text}]}
-    if name == "org_create_goal": return {"content": [{"type": "text", "text": json.dumps(org_create_goal(store, a["goal_id"], a["title"], a["owner"], a.get("specialist_id"), a.get("acceptance_criteria"), a.get("inspection_mode", "result_only"), a.get("checkpoint_policy"), a.get("worker_profile"), a.get("worker_pack"), a.get("permissions"), a.get("worker_class", "basic")))}]}
+    if name == "org_create_goal": return {"content": [{"type": "text", "text": json.dumps(org_create_goal(store, a["goal_id"], a["title"], a["owner"], a.get("specialist_id"), a.get("acceptance_criteria"), a.get("inspection_mode", "result_only"), a.get("checkpoint_policy"), a.get("worker_profile"), a.get("worker_pack"), a.get("permissions"), a.get("worker_class", "basic"), provided_fields=set(a)))}]}
     if name == "org_goal_summary": return {"content": [{"type": "text", "text": json.dumps(goal_summary(store, a["goal_id"], int(a.get("cursor", 0)), int(a.get("limit", 20)), a.get("fields")))}]}
     if name == "org_goal_event": return {"content": [{"type": "text", "text": json.dumps(append_goal_event(store, a["goal_id"], a["kind"], a.get("payload", {}), a["actor"]))}]}
     if name == "org_checkpoint": return {"content": [{"type": "text", "text": json.dumps(goal_checkpoint(store, a["goal_id"], a.get("state", {}), a.get("evidence", []), a["next_action"], a["recoverability"], a["owner"]))}]}
