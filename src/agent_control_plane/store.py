@@ -1258,6 +1258,12 @@ class Store:
         if message:
             try: payload = json.loads(message["payload"])
             except json.JSONDecodeError: payload = {"summary": "invalid stored message payload"}
+        evidence_id = payload.get("evidence_id") if isinstance(payload, dict) else None
+        if run and evidence_id == f"run:{run['id']}":
+            from .result_contract import compact_result_summary
+            terminal_summary = compact_result_summary(run["output"] or "")
+            if terminal_summary:
+                payload["summary"] = terminal_summary
         # Large provider output belongs in durable evidence, never status.
         for key in ("output", "stdout", "activity", "transcript", "state"):
             payload.pop(key, None)

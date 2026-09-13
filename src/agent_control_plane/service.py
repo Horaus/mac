@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .providers import ManagedRun, ProviderAdapter, WorkerResult
 from .profiles import ExecutionProfile, profile_from
+from .result_contract import compact_result_summary
 
 def _inject_context(prompt: str, context: str, profile: ExecutionProfile) -> str:
     if profile.context.allowed_paths:
@@ -296,7 +297,7 @@ def run_worker(store: Store, task_id: str, worker_id: str, adapter: ProviderAdap
     store.release_task_leases(task_id)
     event_type = "QUESTION" if status == "WAITING_DECISION" else ("TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER")
     store.add_message(event_type,
-                      {"exit_code": result.exit_code, "summary": result.output[:2000], "evidence_id": f"run:{run_id}"}, task_id, worker_id)
+                      {"exit_code": result.exit_code, "summary": compact_result_summary(result.output), "evidence_id": f"run:{run_id}"}, task_id, worker_id)
     _cleanup_restricted_workspace(restricted_workspace)
     return result
 
@@ -422,11 +423,11 @@ def finish_managed_worker(store: Store, task_id: str, worker_id: str, run: Manag
     ).fetchone()
     if status == "WAITING_DECISION" and pending_decision is None:
         store.add_message("QUESTION",
-                          {"exit_code": result.exit_code, "summary": result.output[:2000], "evidence_id": f"run:{run.run_id}"}, task_id, worker_id)
+                          {"exit_code": result.exit_code, "summary": compact_result_summary(result.output), "evidence_id": f"run:{run.run_id}"}, task_id, worker_id)
     elif status != "WAITING_DECISION":
         event_type = "TASK_COMPLETE" if result.exit_code == 0 else "BLOCKER"
         store.add_message(event_type,
-                          {"exit_code": result.exit_code, "summary": result.output[:2000], "evidence_id": f"run:{run.run_id}"}, task_id, worker_id)
+                          {"exit_code": result.exit_code, "summary": compact_result_summary(result.output), "evidence_id": f"run:{run.run_id}"}, task_id, worker_id)
     _cleanup_restricted_workspace(getattr(run, "restricted_workspace", None))
     return result
 

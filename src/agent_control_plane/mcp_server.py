@@ -317,7 +317,7 @@ def dispatch(store: Store, method: str, args: dict, _daemon_owner: bool = False,
             lambda value: AuthorityPolicy(ExecutionMode(value.get("mode", "isolated_sandbox")), frozenset(value.get("capabilities", []))),
             _context_from_snapshot, lambda queue_id, job: _recover_live_job(store, queue_id, job))
         return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "agent-control-plane", "version": "0.5.5"},
+                "serverInfo": {"name": "agent-control-plane", "version": "0.5.6"},
                 "instructions": f"Startup reconciliation recovered {recovered_count} run(s). You are the Master supervisor. Use MAC Control to register your master_id and request a complete worker group before dispatch. In lock mode, worker capacity is fixed and shortages return PENDING/rejected; flexible mode permits temporary worker counts but does not persist chat history. In lock mode preserve master_id and conversation_id for history; do not silently continue a changed conversation. Use isolated worktrees, never merge worker changes, validate before acceptance, and report status, validation, commit, blockers, and conflicts."}
     if method == "tools/list":
         return {"tools": [{"name": name, "description": f"control-plane {name}",

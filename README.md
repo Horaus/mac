@@ -26,7 +26,7 @@ profile, reasoning effort và sandbox riêng. Để trống một mục nếu mu
 cấu hình mặc định của provider. Model chỉ chạy được khi tài khoản/provider hiện
 tại có quyền sử dụng model đó.
 
-##### Có gì mới trong phiên bản 0.5.5
+##### Có gì mới trong phiên bản 0.5.6
 
 MAC giờ phân biệt worker cơ bản và worker chuyên gia. Worker có trí nhớ làm việc
 để tiếp tục một goal, còn Master quyết định nội dung nào đáng tin cậy để đưa vào
@@ -40,7 +40,7 @@ Workers AI. Master chọn provider và chính sách fallback; MAC theo dõi quot
 request ID và token usage. Secret chỉ được đọc qua tham chiếu tới biến môi
 trường, không được nhận trực tiếp trong task hay lưu vào evidence.
 
-Hotfix 0.5.5 sửa kết quả `result_only` để chỉ trả task được hỏi, giữ checkpoint
+Hotfix 0.5.6 sửa kết quả `result_only` để chỉ trả task được hỏi, giữ checkpoint
 `WAITING_DECISION` hợp lệ và báo lỗi worker-pack theo schema thay vì lỗi Python.
 Màn trạng thái không còn tải toàn bộ output lịch sử. MCP reconnect cũng không
 còn đánh dấu `ORPHANED` giả khi process worker cũ vẫn sống và đúng identity.
@@ -48,6 +48,8 @@ Tạo lại cùng goal với metadata không đổi giờ trả xác nhận `alr
 vì exception; dùng lại ID với metadata khác vẫn bị từ chối.
 Cấu hình goal đã lưu vẫn được giữ nguyên nếu client kết nối lại bỏ qua hoặc dùng
 giá trị mặc định cho các trường tạo goal tùy chọn.
+Kết quả gọn giờ lấy tin nhắn kết luận cuối của worker thay vì phần log lệnh ở
+đầu JSONL.
 
 ##### Thử API Google và Cloudflare
 
@@ -246,7 +248,7 @@ Codex profile, reasoning effort, and sandbox. Leave a field blank to inherit
 the provider default. A configured model can run only when the current account
 and provider are entitled to use it.
 
-##### What is new in version 0.5.5
+##### What is new in version 0.5.6
 
 MAC now distinguishes basic workers from specialists. Workers retain durable
 working memory for an active goal, while the Master decides what trusted
@@ -255,12 +257,12 @@ and interrupted actions can be recovered after quota exhaustion, disconnects,
 or restarts. If the original provider session cannot be resumed, MAC discloses
 that fact instead of pretending the worker still remembers it.
 
-Version 0.5.5 also adds free-tier API routing for Google Gemini and Cloudflare
+Version 0.5.6 also adds free-tier API routing for Google Gemini and Cloudflare
 Workers AI. The Master owns provider selection and fallback policy; MAC records
 quota classification, request IDs, and token usage. Secrets are resolved from
 environment references and are never accepted as task or MCP payload values.
 
-The 0.5.5 hotfix makes `result_only` truly task-scoped, preserves explicit
+The 0.5.6 hotfix makes `result_only` truly task-scoped, preserves explicit
 `WAITING_DECISION` checkpoints, returns schema errors for malformed worker
 packs, and keeps historical output out of the status screen. Reconnecting MCP
 clients no longer falsely orphan a live identity-matched worker process.
@@ -268,6 +270,8 @@ Replaying goal creation with identical immutable metadata now confirms the
 existing goal; conflicting reuse of an ID still fails closed.
 Stored goal configuration remains authoritative when a reconnecting client
 omits or defaults optional creation fields.
+Compact results now extract the worker's final assistant message rather than
+leading command logs from provider JSONL.
 
 ##### Trying the Google and Cloudflare APIs
 
