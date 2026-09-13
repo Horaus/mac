@@ -50,20 +50,30 @@ def create_goal(store: Store, goal_id: str, title: str, owner: str, specialist_i
         raise ValueError("invalid worker class")
     if worker_class == "basic" and specialist_id:
         raise ValueError("basic worker cannot have specialist identity")
-    if store.db.execute("SELECT 1 FROM goals WHERE id=?", (goal_id,)).fetchone():
-        raise ValueError("goal already exists")
     criteria = acceptance_criteria or []; policy = checkpoint_policy or {}; profile = worker_profile or {}; permissions = permissions or []
     if any(not isinstance(item, str) for item in permissions): raise ValueError("permissions must be strings")
     if {"git.push", "external.publish", "provider.paid_submit", "destructive.delete"}.intersection(permissions):
         raise PermissionError("goal creation cannot grant destructive/external authority")
     stamp = _now(); body = {"id": goal_id, "title": title, "owner": owner, "specialist_id": specialist_id,
                              "acceptance": criteria, "inspection_mode": inspection_mode, "checkpoint_policy": policy, "worker_profile": profile, "worker_pack": worker_pack, "permissions": permissions, "worker_class": worker_class}
+    expected_digest = _digest(body)
+    existing = store.db.execute("SELECT * FROM goals WHERE id=?", (goal_id,)).fetchone()
+    if existing:
+        metadata = dict(existing)
+        if existing["digest"] != expected_digest:
+            raise ValueError(json.dumps({"error": "goal_id_conflict", "goal_id": goal_id,
+                                         "existing": {"title": existing["title"], "owner": existing["owner"],
+                                                      "status": existing["status"], "digest": existing["digest"]},
+                                         "requested_digest": expected_digest}, sort_keys=True))
+        metadata.update({"created": False, "already_exists": True})
+        return metadata
     store.db.execute("INSERT INTO goals(id,title,status,specialist_id,inspection_mode,acceptance_json,checkpoint_policy_json,worker_profile_json,worker_pack_id,permissions_json,worker_class,digest,source,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (goal_id, title, "READY", specialist_id, inspection_mode, json.dumps(criteria), json.dumps(policy, sort_keys=True), json.dumps(profile, sort_keys=True), worker_pack, json.dumps(permissions, sort_keys=True), worker_class, _digest(body), "master", owner, stamp, stamp))
+                     (goal_id, title, "READY", specialist_id, inspection_mode, json.dumps(criteria), json.dumps(policy, sort_keys=True), json.dumps(profile, sort_keys=True), worker_pack, json.dumps(permissions, sort_keys=True), worker_class, expected_digest, "master", owner, stamp, stamp))
     store.db.execute("INSERT INTO goal_events(id,goal_id,kind,payload_json,sequence,created_at) VALUES(?,?,?,?,?,?)",
                      (uuid.uuid4().hex, goal_id, "GOAL_STARTED", json.dumps({"status": "READY"}), 1, stamp))
     store.db.commit()
-    return dict(_require_goal(store, goal_id))
+    created = dict(_require_goal(store, goal_id)); created.update({"created": True, "already_exists": False})
+    return created
 
 
 def append_goal_event(store: Store, goal_id: str, kind: str, payload: dict, actor: str) -> dict:
